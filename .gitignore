@@ -37,6 +37,9 @@ dist
 .playwright-cli
 .playwright-mcp
 .claude/
+.local/
+.env
+.cde-demo-workspace/
 .agents/agents/*.local.md
 .github/agents/*.local.md
 .agents/agents/*.local.agent.md
