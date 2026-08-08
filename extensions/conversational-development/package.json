@@ -22,7 +22,8 @@
   "scripts": {
     "compile": "gulp compile-extension:conversational-development",
     "watch": "gulp watch-extension:conversational-development",
-    "test:navigation": "node --test ./out/test/navigationRanking.test.js"
+    "test:navigation": "node --test ./out/test/navigationRanking.test.js",
+    "test:code-qa": "node --test ./out/test/codeQaProtocol.test.js"
   },
   "contributes": {
     "viewsContainers": {
