@@ -3,6 +3,7 @@
 
 	const vscode = acquireVsCodeApi();
 	const connectButton = document.getElementById('connect');
+	const muteButton = document.getElementById('mute');
 	const directButton = document.getElementById('direct');
 	const textForm = document.getElementById('textForm');
 	const textInput = document.getElementById('textInput');
@@ -16,6 +17,7 @@
 	let peerConnection;
 	let dataChannel;
 	let microphone;
+	let microphoneMuted = false;
 	let sequence = 0;
 	let sessionEpochSequence = 0;
 	let activeSessionEpoch;
@@ -44,6 +46,25 @@
 		stateText.textContent = label;
 		orb.className = `orb ${state}`;
 		log(`state.${state}`);
+	}
+
+	function setReadyState() {
+		setState(microphoneMuted ? 'muted' : 'listening', microphoneMuted ? 'Muted' : 'Listening');
+	}
+
+	function setMicrophoneMuted(muted) {
+		const audioTrack = microphone?.getAudioTracks()[0];
+		if (!audioTrack) {
+			return;
+		}
+
+		microphoneMuted = muted;
+		audioTrack.enabled = !muted;
+		muteButton.textContent = muted ? 'Unmute' : 'Mute';
+		muteButton.title = muted ? 'Unmute microphone' : 'Mute microphone';
+		muteButton.setAttribute('aria-pressed', String(muted));
+		setReadyState();
+		log(muted ? 'microphone.muted' : 'microphone.unmuted');
 	}
 
 	function sendEvent(event) {
@@ -100,9 +121,10 @@
 				if (activeSessionEpoch !== sessionEpoch || dataChannel !== channel) {
 					return;
 				}
-				setState('listening', 'Listening');
+				setReadyState();
 				connectButton.disabled = false;
 				connectButton.textContent = 'Disconnect';
+				muteButton.disabled = false;
 				assistantText.textContent = 'Ask me to navigate or explain the workspace.';
 				log('realtime.ready');
 			});
@@ -137,6 +159,7 @@
 		dataChannel?.close();
 		peerConnection?.close();
 		microphone = undefined;
+		microphoneMuted = false;
 		dataChannel = undefined;
 		peerConnection = undefined;
 		activeSessionEpoch = undefined;
@@ -149,6 +172,10 @@
 		pendingSdp.clear();
 		connectButton.textContent = 'Connect';
 		connectButton.disabled = false;
+		muteButton.textContent = 'Mute';
+		muteButton.title = 'Mute microphone';
+		muteButton.setAttribute('aria-pressed', 'false');
+		muteButton.disabled = true;
 		if (updateCopy) {
 			setState('idle', 'Disconnected');
 			assistantText.textContent = 'Waiting to connect.';
@@ -160,7 +187,7 @@
 		switch (event.type) {
 			case 'input_audio_buffer.speech_started':
 				userBuffer = '';
-				setState('listening', 'Listening');
+				setReadyState();
 				break;
 			case 'input_audio_buffer.speech_stopped':
 				setState('thinking', 'Understanding…');
@@ -198,7 +225,7 @@
 					setState('acting', 'Using the IDE…');
 				} else if (!calledTool || !awaitingToolFollowup) {
 					awaitingToolFollowup = false;
-					setState('listening', 'Listening');
+					setReadyState();
 				}
 				break;
 			}
@@ -282,6 +309,7 @@
 	});
 
 	connectButton.addEventListener('click', () => void connect());
+	muteButton.addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
 	directButton.addEventListener('click', () => {
 		const requestId = nextId('direct');
 		log('direct.request');

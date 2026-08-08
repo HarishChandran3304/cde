@@ -388,7 +388,10 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				<p id="state">Disconnected</p>
 			</div>
 		</header>
-		<button id="connect" class="primary">Connect</button>
+		<div class="connection-controls">
+			<button id="connect" class="primary">Connect</button>
+			<button id="mute" class="mute" type="button" aria-pressed="false" title="Mute microphone" disabled>Mute</button>
+		</div>
 		<section class="transcript" aria-live="polite">
 			<span class="label">You</span>
 			<p id="userText">Say “why can the discount make this negative?”</p>
