@@ -219,7 +219,7 @@ This is a focused conversational-development experiment. You have exactly seven 
 		},
 	],
 	tool_choice: 'auto',
-	max_output_tokens: 120,
+	max_output_tokens: 1024,
 } as const;
 
 class ConversationViewProvider implements vscode.WebviewViewProvider {

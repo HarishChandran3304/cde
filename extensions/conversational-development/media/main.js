@@ -245,6 +245,9 @@
 				}
 				break;
 			case 'response.done': {
+				const responseStatus = event.response?.status || 'unknown';
+				const responseReason = event.response?.status_details?.reason;
+				log('response.done.detail', `${responseStatus}${responseReason ? ` ${responseReason}` : ''}`);
 				const calledTool = event.response?.output?.some(item => item.type === 'function_call');
 				if (pendingTools.size > 0) {
 					setState('acting', 'Using the IDE…');
