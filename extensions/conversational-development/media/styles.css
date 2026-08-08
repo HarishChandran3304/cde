@@ -143,6 +143,11 @@ button.secondary {
 	margin-top: 9px;
 }
 
+.transcript p {
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+}
+
 .label {
 	color: var(--vscode-descriptionForeground);
 	font-size: 10px;

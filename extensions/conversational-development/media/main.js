@@ -23,6 +23,7 @@
 	let activeSessionEpoch;
 	let assistantBuffer = '';
 	let userBuffer = '';
+	let pinnedToolAnswer = false;
 	let awaitingToolFollowup = false;
 	const pendingSdp = new Map();
 	const handledCalls = new Set();
@@ -63,6 +64,25 @@
 		muteButton.textContent = muted ? 'Unmute' : 'Mute';
 		muteButton.title = muted ? 'Unmute microphone' : 'Mute microphone';
 		muteButton.setAttribute('aria-pressed', String(muted));
+		try {
+			sendEvent({
+				type: 'session.update',
+				session: {
+					audio: {
+						input: {
+							turn_detection: {
+								type: 'semantic_vad',
+								eagerness: 'high',
+								create_response: true,
+								interrupt_response: !muted,
+							},
+						},
+					},
+				},
+			});
+		} catch (error) {
+			log('microphone.session-update.error', error.message);
+		}
 		setReadyState();
 		log(muted ? 'microphone.muted' : 'microphone.unmuted');
 	}
@@ -163,6 +183,7 @@
 		dataChannel = undefined;
 		peerConnection = undefined;
 		activeSessionEpoch = undefined;
+		pinnedToolAnswer = false;
 		awaitingToolFollowup = false;
 		handledCalls.clear();
 		pendingTools.clear();
@@ -186,6 +207,7 @@
 		log(event.type);
 		switch (event.type) {
 			case 'input_audio_buffer.speech_started':
+				pinnedToolAnswer = false;
 				userBuffer = '';
 				setReadyState();
 				break;
@@ -208,7 +230,9 @@
 			case 'response.audio_transcript.delta':
 			case 'response.output_text.delta':
 				assistantBuffer += event.delta || '';
-				assistantText.textContent = assistantBuffer;
+				if (!pinnedToolAnswer) {
+					assistantText.textContent = assistantBuffer;
+				}
 				setState('speaking', 'Speaking');
 				break;
 			case 'response.function_call_arguments.done':
@@ -265,6 +289,7 @@
 		pendingTools.delete(message.callId);
 		awaitingToolFollowup = true;
 		log('tool.result', JSON.stringify(message.result));
+		pinnedToolAnswer = Boolean(message.result.display_response);
 		assistantText.textContent = message.result.display_response || message.result.spoken_response;
 		sendEvent({
 			type: 'conversation.item.create',
@@ -322,6 +347,7 @@
 			return;
 		}
 		try {
+			pinnedToolAnswer = false;
 			userText.textContent = text;
 			sendEvent({
 				type: 'conversation.item.create',
