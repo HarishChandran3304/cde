@@ -6,14 +6,50 @@
 import * as vscode from 'vscode';
 
 const VIEW_ID = 'cde.conversation';
-const CHECKOUT_FILE = 'src/checkout.ts';
-const CHECKOUT_ANCHOR = 'calculateFinalPrice';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
+const DOCUMENT_SYMBOL_RETRY_DELAY_MS = 250;
+
+interface CodeTarget {
+	readonly file: string;
+	readonly symbol: string;
+	readonly fallbackAnchor: string;
+	readonly spokenName: string;
+}
+
+const CODE_TARGETS = {
+	checkout_final_price: {
+		file: 'src/checkout.ts',
+		symbol: 'calculateFinalPrice',
+		fallbackAnchor: 'export function calculateFinalPrice',
+		spokenName: 'calculateFinalPrice',
+	},
+} as const satisfies Record<string, CodeTarget>;
+
+type CodeTargetId = keyof typeof CODE_TARGETS;
+const CODE_TARGET_IDS = Object.keys(CODE_TARGETS) as CodeTargetId[];
+type CodeToolName = 'open_code_target' | 'show_code_references';
+
+interface SymbolNode {
+	readonly name: string;
+	readonly range?: vscode.Range;
+	readonly selectionRange?: vscode.Range;
+	readonly location?: vscode.Location;
+	readonly children?: readonly SymbolNode[];
+}
+
+interface ResolvedCodeTarget {
+	readonly uri: vscode.Uri;
+	readonly document: vscode.TextDocument;
+	readonly selectionRange: vscode.Range;
+	readonly highlightRange: vscode.Range;
+}
 
 interface ToolResult {
 	readonly ok: boolean;
+	readonly target?: CodeTargetId;
 	readonly file?: string;
 	readonly line?: number;
+	readonly reference_count?: number;
 	readonly spoken_response: string;
 	readonly error?: string;
 }
@@ -28,13 +64,14 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a single-purpose architecture experiment. You have exactly one useful tool.
-- When the user asks to open, navigate to, find, or show the checkout logic, call open_demo_file immediately.
-- Treat natural paraphrases such as "open the checkout service" and "where is checkout calculated" as the same request.
-- Never claim the file opened before the tool succeeds.
+This is a focused code-navigation experiment. You have exactly two useful tools.
+- When the user asks to open, navigate to, find, or show the checkout price calculation, call open_code_target with checkout_final_price immediately.
+- When the user asks for references, usages, or callers of calculateFinalPrice, call show_code_references with checkout_final_price immediately.
+- Treat natural paraphrases such as "open the checkout service", "where is checkout calculated", and "show every caller" as the matching tool request.
+- Never claim an editor action happened before its tool succeeds.
 - Do not speak before calling the tool.
 - When the tool returns, say its spoken_response exactly and add nothing.
-- For unrelated requests, briefly say this experiment only opens the checkout logic.`,
+- For unrelated requests, briefly say this experiment only navigates the prepared checkout code.`,
 	audio: {
 		input: {
 			transcription: { model: 'gpt-4o-mini-transcribe' },
@@ -53,14 +90,30 @@ This is a single-purpose architecture experiment. You have exactly one useful to
 	tools: [
 		{
 			type: 'function',
-			name: 'open_demo_file',
-			description: 'Open the prepared checkout logic file and reveal its final-price function in the editor.',
+			name: 'open_code_target',
+			description: 'Open and highlight calculateFinalPrice in the prepared checkout file.',
 			parameters: {
 				type: 'object',
 				properties: {
 					target: {
 						type: 'string',
-						enum: ['checkout_logic'],
+						enum: CODE_TARGET_IDS,
+					},
+				},
+				required: ['target'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'show_code_references',
+			description: 'Find and show the native References peek for calculateFinalPrice, including its callers.',
+			parameters: {
+				type: 'object',
+				properties: {
+					target: {
+						type: 'string',
+						enum: CODE_TARGET_IDS,
 					},
 				},
 				required: ['target'],
@@ -159,13 +212,16 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 	private async executeTool(message: Extract<WebviewMessage, { type: 'executeTool' }>): Promise<void> {
 		this.trace(`tool.call ${message.name} ${message.arguments}`);
 		let result: ToolResult;
-		if (message.name === 'open_demo_file' && hasValidOpenDemoFileArguments(message.arguments)) {
-			result = await openCheckoutLogic(this.highlight);
-		} else if (message.name === 'open_demo_file') {
+		const targetId = isCodeToolName(message.name) ? parseCodeTargetArguments(message.arguments) : undefined;
+		if (message.name === 'open_code_target' && targetId) {
+			result = await openCodeTarget(targetId, this.highlight);
+		} else if (message.name === 'show_code_references' && targetId) {
+			result = await showCodeReferences(targetId, this.highlight);
+		} else if (isCodeToolName(message.name)) {
 			result = {
 				ok: false,
-				spoken_response: 'I could not open the checkout logic.',
-				error: 'Invalid arguments for open_demo_file.',
+				spoken_response: 'I could not find that code target.',
+				error: `Invalid arguments for ${message.name}.`,
 			};
 		} else {
 			result = {
@@ -238,58 +294,189 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 	}
 }
 
-function hasValidOpenDemoFileArguments(serializedArguments: string): boolean {
+function isCodeToolName(name: string): name is CodeToolName {
+	return name === 'open_code_target' || name === 'show_code_references';
+}
+
+function isCodeTargetId(value: string): value is CodeTargetId {
+	return Object.prototype.hasOwnProperty.call(CODE_TARGETS, value);
+}
+
+function parseCodeTargetArguments(serializedArguments: string): CodeTargetId | undefined {
 	try {
 		const value = JSON.parse(serializedArguments) as Record<string, string> | null;
-		return value !== null
+		if (value !== null
 			&& typeof value === 'object'
 			&& !Array.isArray(value)
 			&& Object.keys(value).length === 1
-			&& value.target === 'checkout_logic';
+			&& typeof value.target === 'string'
+			&& isCodeTargetId(value.target)) {
+			return value.target;
+		}
 	} catch {
-		return false;
+		// Invalid JSON is rejected at the host boundary.
 	}
+	return undefined;
 }
 
-async function openCheckoutLogic(highlight: vscode.TextEditorDecorationType): Promise<ToolResult> {
+async function openCodeTarget(targetId: CodeTargetId, highlight: vscode.TextEditorDecorationType): Promise<ToolResult> {
+	const target = CODE_TARGETS[targetId];
 	try {
-		const folder = vscode.workspace.workspaceFolders?.[0];
-		if (!folder) {
-			throw new Error('Open the demo/voice-open-checkout folder first.');
-		}
-
-		const uri = vscode.Uri.joinPath(folder.uri, ...CHECKOUT_FILE.split('/'));
-		const document = await vscode.workspace.openTextDocument(uri);
-		const editor = await vscode.window.showTextDocument(document, { preview: false });
-		const source = document.getText();
-		const anchorOffset = source.indexOf(CHECKOUT_ANCHOR);
-		if (anchorOffset < 0) {
-			throw new Error(`Could not find ${CHECKOUT_ANCHOR} in ${CHECKOUT_FILE}.`);
-		}
-
-		const start = document.positionAt(anchorOffset);
-		const end = document.positionAt(anchorOffset + CHECKOUT_ANCHOR.length);
-		const selection = new vscode.Selection(start, end);
-		const lineRange = document.lineAt(start.line).range;
-		editor.selection = selection;
-		editor.setDecorations(highlight, [lineRange]);
-		editor.revealRange(lineRange, vscode.TextEditorRevealType.InCenter);
+		const resolved = await resolveCodeTarget(target);
+		await revealCodeTarget(resolved, highlight);
 
 		return {
 			ok: true,
-			file: vscode.workspace.asRelativePath(uri),
-			line: start.line + 1,
-			spoken_response: 'Opened the checkout logic.',
+			target: targetId,
+			file: vscode.workspace.asRelativePath(resolved.uri),
+			line: resolved.selectionRange.start.line + 1,
+			spoken_response: `Opened ${target.spokenName}.`,
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		void vscode.window.showErrorMessage(vscode.l10n.t('CDE could not open checkout logic: {0}', message));
+		void vscode.window.showErrorMessage(vscode.l10n.t('CDE could not open {0}: {1}', target.spokenName, message));
 		return {
 			ok: false,
-			spoken_response: 'I could not open the checkout logic.',
+			target: targetId,
+			spoken_response: `I could not open ${target.spokenName}.`,
 			error: message,
 		};
 	}
+}
+
+async function showCodeReferences(targetId: CodeTargetId, highlight: vscode.TextEditorDecorationType): Promise<ToolResult> {
+	const target = CODE_TARGETS[targetId];
+	try {
+		const resolved = await resolveCodeTarget(target);
+		await revealCodeTarget(resolved, highlight);
+		const references = await vscode.commands.executeCommand<vscode.Location[] | undefined>(
+			'vscode.executeReferenceProvider',
+			resolved.uri,
+			resolved.selectionRange.start,
+		) ?? [];
+
+		if (references.length === 0) {
+			throw new Error(`No references found for ${target.symbol}.`);
+		}
+
+		await vscode.commands.executeCommand(
+			'editor.action.peekLocations',
+			resolved.uri,
+			resolved.selectionRange.start,
+			references,
+			'peek',
+		);
+
+		return {
+			ok: true,
+			target: targetId,
+			file: vscode.workspace.asRelativePath(resolved.uri),
+			line: resolved.selectionRange.start.line + 1,
+			reference_count: references.length,
+			spoken_response: `Showing ${target.spokenName} references.`,
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		void vscode.window.showErrorMessage(vscode.l10n.t('CDE could not show references for {0}: {1}', target.spokenName, message));
+		return {
+			ok: false,
+			target: targetId,
+			spoken_response: `I could not show ${target.spokenName} references.`,
+			error: message,
+		};
+	}
+}
+
+async function resolveCodeTarget(target: CodeTarget): Promise<ResolvedCodeTarget> {
+	const folder = vscode.workspace.workspaceFolders?.[0];
+	if (!folder) {
+		throw new Error('Open the demo/voice-open-checkout folder first.');
+	}
+
+	const uri = vscode.Uri.joinPath(folder.uri, ...target.file.split('/'));
+	const document = await vscode.workspace.openTextDocument(uri);
+	const providerSymbol = await findSymbolWithRetry(uri, target.symbol);
+	if (providerSymbol) {
+		const range = providerSymbol.range ?? providerSymbol.location?.range;
+		const selectionRange = providerSymbol.selectionRange ?? providerSymbol.location?.range;
+		if (range && selectionRange) {
+			return { uri, document, selectionRange, highlightRange: range };
+		}
+	}
+
+	return resolveCodeTargetFromText(target, uri, document);
+}
+
+async function findSymbolWithRetry(uri: vscode.Uri, symbolName: string): Promise<SymbolNode | undefined> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const symbols = await vscode.commands.executeCommand<SymbolNode[] | undefined>(
+				'vscode.executeDocumentSymbolProvider',
+				uri,
+			) ?? [];
+			const symbol = findSymbol(symbols, symbolName);
+			if (symbol) {
+				return symbol;
+			}
+		} catch {
+			// Retry once while the language provider warms up, then use the text anchor.
+		}
+
+		if (attempt === 0) {
+			await delay(DOCUMENT_SYMBOL_RETRY_DELAY_MS);
+		}
+	}
+	return undefined;
+}
+
+function findSymbol(symbols: readonly SymbolNode[], symbolName: string): SymbolNode | undefined {
+	for (const symbol of symbols) {
+		if (symbol.name === symbolName) {
+			return symbol;
+		}
+		const child = findSymbol(symbol.children ?? [], symbolName);
+		if (child) {
+			return child;
+		}
+	}
+	return undefined;
+}
+
+function resolveCodeTargetFromText(target: CodeTarget, uri: vscode.Uri, document: vscode.TextDocument): ResolvedCodeTarget {
+	const symbolOffsetWithinAnchor = target.fallbackAnchor.indexOf(target.symbol);
+	const anchorOffset = document.getText().indexOf(target.fallbackAnchor);
+	if (anchorOffset < 0 || symbolOffsetWithinAnchor < 0) {
+		throw new Error(`Could not find ${target.symbol} in ${target.file}.`);
+	}
+
+	const symbolOffset = anchorOffset + symbolOffsetWithinAnchor;
+	const start = document.positionAt(symbolOffset);
+	const end = document.positionAt(symbolOffset + target.symbol.length);
+	return {
+		uri,
+		document,
+		selectionRange: new vscode.Range(start, end),
+		highlightRange: document.lineAt(start.line).range,
+	};
+}
+
+async function revealCodeTarget(resolved: ResolvedCodeTarget, highlight: vscode.TextEditorDecorationType): Promise<void> {
+	const editor = await vscode.window.showTextDocument(resolved.document, {
+		preview: false,
+		preserveFocus: false,
+		selection: resolved.selectionRange,
+	});
+	editor.selection = new vscode.Selection(resolved.selectionRange.start, resolved.selectionRange.end);
+	editor.setDecorations(highlight, [resolved.highlightRange]);
+	editor.revealRange(resolved.highlightRange, vscode.TextEditorRevealType.InCenter);
+}
+
+function delay(durationMs: number): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, durationMs));
+}
+
+function openCheckoutLogic(highlight: vscode.TextEditorDecorationType): Promise<ToolResult> {
+	return openCodeTarget('checkout_final_price', highlight);
 }
 
 function getOpenAiApiKey(): string | undefined {

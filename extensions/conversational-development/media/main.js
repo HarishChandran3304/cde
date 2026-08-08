@@ -61,7 +61,7 @@
 
 		connectButton.disabled = true;
 		setState('connecting', 'Connecting…');
-		assistantText.textContent = 'Opening a Realtime session.';
+		assistantText.textContent = 'Starting the conversational IDE.';
 
 		try {
 			const sessionEpoch = ++sessionEpochSequence;
@@ -103,7 +103,7 @@
 				setState('listening', 'Listening');
 				connectButton.disabled = false;
 				connectButton.textContent = 'Disconnect';
-				assistantText.textContent = 'Ask me to open the checkout logic.';
+				assistantText.textContent = 'Ask me to navigate the checkout code.';
 				log('realtime.ready');
 			});
 			channel.addEventListener('message', event => {
@@ -195,7 +195,7 @@
 			case 'response.done': {
 				const calledTool = event.response?.output?.some(item => item.type === 'function_call');
 				if (pendingTools.size > 0) {
-					setState('acting', 'Opening checkout…');
+					setState('acting', 'Using the IDE…');
 				} else if (!calledTool || !awaitingToolFollowup) {
 					awaitingToolFollowup = false;
 					setState('listening', 'Listening');
@@ -216,8 +216,8 @@
 		handledCalls.add(callId);
 		pendingTools.set(callId, sessionEpoch);
 		const requestId = nextId('tool');
-		setState('acting', 'Opening checkout…');
-		assistantText.textContent = `Calling ${name}.`;
+		setState('acting', 'Using the IDE…');
+		assistantText.textContent = 'Working in the editor…';
 		log('tool.dispatch', `${name} ${args || '{}'}`);
 		vscode.postMessage({
 			type: 'executeTool',
