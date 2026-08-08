@@ -67,6 +67,25 @@ Open `createOrderDraft`, then say:
 
 CDE opens the outgoing-call hierarchy containing `calculateFinalPrice`.
 
+## Grounded code Q&A
+
+Open `calculateFinalPrice`, place the cursor on its return statement, then ask:
+
+> Why can the discount make this negative?
+
+Claude inspects the repository through read-only search tools. CDE speaks a short answer while the sidebar shows the grounded explanation with `src/checkout.ts:line` citations.
+
+Continue with contextual and repository-wide questions:
+
+- “What does this function do?”
+- “Where does `discountPercent` come from?”
+- “Which user-visible flows depend on this calculation?”
+- “Walk me through the data flow from the cart summary to the final total.”
+- “What is risky about changing this function?”
+- “How would you fix this at the API boundary?”
+
+The Q&A worker can read, glob, and grep the open workspace. It cannot edit files, run shell commands, browse the web, or use external MCP tools.
+
 ## Golden navigation sequence
 
 1. “Open checkout.”
