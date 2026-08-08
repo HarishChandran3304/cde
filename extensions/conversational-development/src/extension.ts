@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 const VIEW_ID = 'cde.conversation';
 const CHECKOUT_FILE = 'src/checkout.ts';
 const CHECKOUT_ANCHOR = 'calculateFinalPrice';
+const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
 interface ToolResult {
 	readonly ok: boolean;
@@ -19,9 +20,8 @@ interface ToolResult {
 
 type WebviewMessage =
 	| { readonly type: 'exchangeSdp'; readonly requestId: string; readonly sdp: string }
-	| { readonly type: 'executeTool'; readonly requestId: string; readonly callId: string; readonly name: string; readonly arguments: string }
-	| { readonly type: 'openCheckoutDirectly'; readonly requestId: string }
-	| { readonly type: 'openSettings' };
+	| { readonly type: 'executeTool'; readonly requestId: string; readonly sessionEpoch: number; readonly callId: string; readonly name: string; readonly arguments: string }
+	| { readonly type: 'openCheckoutDirectly'; readonly requestId: string };
 
 const realtimeSession = {
 	type: 'realtime',
@@ -106,9 +106,6 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				await this.post({ type: 'directResult', requestId: message.requestId, result });
 				return;
 			}
-			case 'openSettings':
-				await vscode.commands.executeCommand('workbench.action.openSettings', 'cde.openaiApiKey');
-				return;
 		}
 	}
 
@@ -123,14 +120,27 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 			const form = new FormData();
 			form.set('sdp', sdp);
 			form.set('session', JSON.stringify(realtimeSession));
-			const response = await fetch('https://api.openai.com/v1/realtime/calls', {
-				method: 'POST',
-				headers: {
-					Authorization: `Bearer ${apiKey}`,
-					'OpenAI-Safety-Identifier': 'cde-local-spike',
-				},
-				body: form,
-			});
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), SDP_EXCHANGE_TIMEOUT_MS);
+			let response: Response;
+			try {
+				response = await fetch('https://api.openai.com/v1/realtime/calls', {
+					method: 'POST',
+					headers: {
+						Authorization: `Bearer ${apiKey}`,
+						'OpenAI-Safety-Identifier': 'cde-local-spike',
+					},
+					body: form,
+					signal: controller.signal,
+				});
+			} catch (error) {
+				if (controller.signal.aborted) {
+					throw new Error('OpenAI Realtime session setup timed out.');
+				}
+				throw error;
+			} finally {
+				clearTimeout(timeout);
+			}
 
 			const answer = await response.text();
 			if (!response.ok) {
@@ -149,8 +159,14 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 	private async executeTool(message: Extract<WebviewMessage, { type: 'executeTool' }>): Promise<void> {
 		this.trace(`tool.call ${message.name} ${message.arguments}`);
 		let result: ToolResult;
-		if (message.name === 'open_demo_file') {
+		if (message.name === 'open_demo_file' && hasValidOpenDemoFileArguments(message.arguments)) {
 			result = await openCheckoutLogic(this.highlight);
+		} else if (message.name === 'open_demo_file') {
+			result = {
+				ok: false,
+				spoken_response: 'I could not open the checkout logic.',
+				error: 'Invalid arguments for open_demo_file.',
+			};
 		} else {
 			result = {
 				ok: false,
@@ -163,6 +179,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		await this.post({
 			type: 'toolResult',
 			requestId: message.requestId,
+			sessionEpoch: message.sessionEpoch,
 			callId: message.callId,
 			result,
 		});
@@ -211,7 +228,6 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		<details>
 			<summary>Architecture checks</summary>
 			<button id="direct" class="secondary">Test IDE bridge</button>
-			<button id="settings" class="secondary">Set API key</button>
 			<pre id="events"></pre>
 		</details>
 	</main>
@@ -219,6 +235,19 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 	<script src="${scriptUri}"></script>
 </body>
 </html>`;
+	}
+}
+
+function hasValidOpenDemoFileArguments(serializedArguments: string): boolean {
+	try {
+		const value = JSON.parse(serializedArguments) as Record<string, string> | null;
+		return value !== null
+			&& typeof value === 'object'
+			&& !Array.isArray(value)
+			&& Object.keys(value).length === 1
+			&& value.target === 'checkout_logic';
+	} catch {
+		return false;
 	}
 }
 
