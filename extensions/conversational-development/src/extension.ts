@@ -34,6 +34,7 @@ interface CdeToolArguments {
 	readonly action?: EditorControlAction;
 	readonly referenceAction?: ReferenceControlAction;
 	readonly direction?: CallHierarchyDirection;
+	readonly occurrence?: number;
 }
 
 type WebviewMessage =
@@ -52,7 +53,7 @@ This is a focused conversational-development experiment. You have exactly nine u
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
 - Use show_references for generic references or usages. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
-- Use control_references after show_references when the user says next reference, previous reference, open this reference, close references, or asks for a reference in a particular file. For requests like "show me the one in checkout.js", use select_file and pass the user's filename or module phrase as file.
+- Use control_references after show_references when the user says next reference, previous reference, open this reference, close references, or asks for a reference in a particular file. For requests like "show me the one in checkout.js", use select_file and pass the user's filename or module phrase as file. When the user specifies an ordinal, such as "the second one in checkout", pass occurrence 2.
 - Use show_call_hierarchy with incoming for actual callers and outgoing for functions called by the target. Do not use generic references when the user specifically says callers, callees, incoming calls, or outgoing calls.
 - Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
 - Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
@@ -114,6 +115,11 @@ This is a focused conversational-development experiment. You have exactly nine u
 					file: {
 						type: 'string',
 						description: 'Optional filename or path hint.',
+					},
+					occurrence: {
+						type: 'integer',
+						minimum: 1,
+						description: 'One-based occurrence within the selected file. Defaults to 1.',
 					},
 					placement: {
 						type: 'string',
@@ -399,7 +405,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 					result = await this.navigation.showReferences(argumentsValue.symbol, argumentsValue.file);
 					break;
 				case 'control_references':
-					result = await this.navigation.controlReferences(argumentsValue.referenceAction!, argumentsValue.file);
+					result = await this.navigation.controlReferences(argumentsValue.referenceAction!, argumentsValue.file, argumentsValue.occurrence);
 					break;
 				case 'show_call_hierarchy':
 					result = await this.navigation.showCallHierarchy(argumentsValue.direction!, argumentsValue.symbol, argumentsValue.file);
@@ -524,7 +530,7 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 				: toolName === 'show_references'
 					? ['symbol', 'file']
 					: toolName === 'control_references'
-						? ['action', 'file']
+						? ['action', 'file', 'occurrence']
 						: toolName === 'show_call_hierarchy'
 						? ['direction', 'symbol', 'file']
 						: toolName === 'go_to_definition'
@@ -536,7 +542,10 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			return undefined;
 		}
 
-		for (const candidate of Object.values(value)) {
+		for (const [key, candidate] of Object.entries(value)) {
+			if (key === 'occurrence') {
+				continue;
+			}
 			if (typeof candidate !== 'string' || !candidate.trim()) {
 				return undefined;
 			}
@@ -556,6 +565,10 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 		}
 		if (toolName === 'control_references'
 			&& (typeof value.action !== 'string' || !REFERENCE_CONTROL_ACTIONS.includes(value.action as ReferenceControlAction))) {
+			return undefined;
+		}
+		if (value.occurrence !== undefined
+			&& (!Number.isInteger(value.occurrence) || (value.occurrence as number) < 1)) {
 			return undefined;
 		}
 		if (toolName === 'control_references'
@@ -579,6 +592,7 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 				? value.action as ReferenceControlAction
 				: undefined,
 			direction: typeof value.direction === 'string' ? value.direction as CallHierarchyDirection : undefined,
+			occurrence: typeof value.occurrence === 'number' ? value.occurrence : undefined,
 		};
 	} catch {
 		return undefined;

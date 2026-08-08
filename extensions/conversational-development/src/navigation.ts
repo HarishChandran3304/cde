@@ -212,7 +212,7 @@ export class NavigationController {
 		}
 	}
 
-	async controlReferences(action: ReferenceControlAction, fileQuery?: string): Promise<NavigationToolResult> {
+	async controlReferences(action: ReferenceControlAction, fileQuery?: string, occurrence = 1): Promise<NavigationToolResult> {
 		try {
 			if (this.lastReferences.length === 0) {
 				throw new Error('Open references for a symbol first.');
@@ -229,7 +229,7 @@ export class NavigationController {
 					if (!fileQuery) {
 						throw new Error('Name the file whose reference you want to see.');
 					}
-					return await this.selectReferenceFile(fileQuery);
+					return await this.selectReferenceFile(fileQuery, occurrence);
 				case 'open': {
 					const result = this.referenceResult('Opened the current reference.');
 					await vscode.commands.executeCommand('closeReferenceSearch');
@@ -352,7 +352,7 @@ export class NavigationController {
 		return this.openSymbol('calculateFinalPrice', 'src/checkout.ts');
 	}
 
-	private async selectReferenceFile(fileQuery: string): Promise<NavigationToolResult> {
+	private async selectReferenceFile(fileQuery: string, occurrence: number): Promise<NavigationToolResult> {
 		const candidates = this.lastReferences.map(location => ({
 			path: vscode.workspace.asRelativePath(location.uri),
 			location,
@@ -361,11 +361,18 @@ export class NavigationController {
 		if (!target) {
 			throw new Error(`No reference result matches ${fileQuery}.`);
 		}
+		const matchingFileReferences = this.lastReferences
+			.filter(reference => reference.uri.toString() === target.location.uri.toString())
+			.sort(compareLocations);
+		const targetReference = matchingFileReferences[occurrence - 1];
+		if (!targetReference) {
+			throw new Error(`${target.path} has ${matchingFileReferences.length} reference${matchingFileReferences.length === 1 ? '' : 's'}, not ${occurrence}.`);
+		}
 
 		for (let attempt = 0; attempt <= this.lastReferences.length; attempt++) {
 			const current = this.currentReferenceLocation();
-			if (current && current.uri.toString() === target.location.uri.toString()) {
-				return this.referenceResult(`Showing the reference in ${target.path}.`);
+			if (current && sameLocation(current, targetReference)) {
+				return this.referenceResult(`Showing reference ${occurrence} in ${target.path}.`);
 			}
 			await vscode.commands.executeCommand('goToNextReference');
 		}
@@ -686,6 +693,16 @@ function isLocationLink(definition: vscode.Location | vscode.LocationLink): defi
 
 function definitionUri(definition: vscode.Location | vscode.LocationLink): vscode.Uri {
 	return isLocationLink(definition) ? definition.targetUri : definition.uri;
+}
+
+function compareLocations(left: vscode.Location, right: vscode.Location): number {
+	return left.uri.toString().localeCompare(right.uri.toString())
+		|| left.range.start.compareTo(right.range.start);
+}
+
+function sameLocation(left: vscode.Location, right: vscode.Location): boolean {
+	return left.uri.toString() === right.uri.toString()
+		&& left.range.start.isEqual(right.range.start);
 }
 
 function delay(durationMs: number): Promise<void> {
