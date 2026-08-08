@@ -116,11 +116,6 @@ This is a focused conversational-development experiment. You have exactly nine u
 						type: 'string',
 						description: 'Optional filename or path hint.',
 					},
-					occurrence: {
-						type: 'integer',
-						minimum: 1,
-						description: 'One-based occurrence within the selected file. Defaults to 1.',
-					},
 					placement: {
 						type: 'string',
 						enum: EDITOR_PLACEMENTS,
@@ -182,6 +177,11 @@ This is a focused conversational-development experiment. You have exactly nine u
 					file: {
 						type: 'string',
 						description: 'A filename, path, or module phrase. Required only for select_file.',
+					},
+					occurrence: {
+						type: 'integer',
+						minimum: 1,
+						description: 'One-based occurrence within the selected file. Defaults to 1.',
 					},
 				},
 				required: ['action'],
