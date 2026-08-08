@@ -7,7 +7,9 @@ import * as vscode from 'vscode';
 import { CodeQaController, CodeQaToolResult } from './codeQa';
 import { CodeQaWalkthroughStep } from './codeQaProtocol';
 import {
+	CALL_HIERARCHY_CONTROL_ACTIONS,
 	CALL_HIERARCHY_DIRECTIONS,
+	CallHierarchyControlAction,
 	CallHierarchyDirection,
 	EDITOR_CONTROL_ACTIONS,
 	EDITOR_PLACEMENTS,
@@ -23,7 +25,7 @@ import { WalkthroughController } from './walkthrough';
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
-type CdeToolName = 'open_file' | 'open_symbol' | 'show_references' | 'control_references' | 'show_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
+type CdeToolName = 'open_file' | 'open_symbol' | 'show_references' | 'control_references' | 'show_call_hierarchy' | 'control_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
 
 interface CdeToolArguments {
 	readonly query?: string;
@@ -33,6 +35,7 @@ interface CdeToolArguments {
 	readonly placement?: EditorPlacement;
 	readonly action?: EditorControlAction;
 	readonly referenceAction?: ReferenceControlAction;
+	readonly callHierarchyAction?: CallHierarchyControlAction;
 	readonly direction?: CallHierarchyDirection;
 	readonly occurrence?: number;
 }
@@ -49,12 +52,13 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused conversational-development experiment. You have exactly nine useful tools.
+This is a focused conversational-development experiment. You have exactly ten useful tools.
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
 - Use show_references for generic references or usages. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
 - Use control_references after show_references when the user says next reference, previous reference, open this reference, close references, or asks for a reference in a particular file. For requests like "show me the one in checkout.js", use select_file and pass the user's filename or module phrase as file. When the user specifies an ordinal, such as "the second one in checkout", pass occurrence 2.
 - Use show_call_hierarchy with incoming for actual callers and outgoing for functions called by the target. Do not use generic references when the user specifically says callers, callees, incoming calls, or outgoing calls.
+- Use control_call_hierarchy after show_call_hierarchy. Use next or previous to move between calls; select with query and/or file to choose a named caller or callee; deeper to follow the selected call; parent to return one hierarchy level; show_incoming or show_outgoing to switch direction; open to keep the selected call; and close to dismiss the hierarchy.
 - Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
 - Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
 - Use ask_codebase for explanations, "why" questions, behavior, data flow, architecture, risks, debugging questions, and questions about selected code. Pass the user's complete question. It receives live editor context and must inspect the repository before answering. Never answer a repository question from your own knowledge.
@@ -210,6 +214,31 @@ This is a focused conversational-development experiment. You have exactly nine u
 					},
 				},
 				required: ['direction'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'control_call_hierarchy',
+			description: 'Navigate the currently open Call Hierarchy by position, semantic caller or callee, depth, and direction.',
+			parameters: {
+				type: 'object',
+				properties: {
+					action: {
+						type: 'string',
+						enum: CALL_HIERARCHY_CONTROL_ACTIONS,
+						description: 'The deterministic hierarchy navigation action.',
+					},
+					query: {
+						type: 'string',
+						description: 'Optional caller or callee name. Used with select.',
+					},
+					file: {
+						type: 'string',
+						description: 'Optional filename, path, or module hint. Used with select.',
+					},
+				},
+				required: ['action'],
 				additionalProperties: false,
 			},
 		},
@@ -410,6 +439,9 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				case 'show_call_hierarchy':
 					result = await this.navigation.showCallHierarchy(argumentsValue.direction!, argumentsValue.symbol, argumentsValue.file);
 					break;
+				case 'control_call_hierarchy':
+					result = await this.navigation.controlCallHierarchy(argumentsValue.callHierarchyAction!, argumentsValue.query, argumentsValue.file);
+					break;
 				case 'go_to_definition':
 					result = await this.navigation.goToDefinition(argumentsValue.symbol, argumentsValue.file, argumentsValue.placement);
 					break;
@@ -508,9 +540,10 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 function isCdeToolName(name: string): name is CdeToolName {
 	return name === 'open_file'
 		|| name === 'open_symbol'
-			|| name === 'show_references'
-			|| name === 'control_references'
+		|| name === 'show_references'
+		|| name === 'control_references'
 		|| name === 'show_call_hierarchy'
+		|| name === 'control_call_hierarchy'
 		|| name === 'go_to_definition'
 		|| name === 'control_editor'
 		|| name === 'ask_codebase';
@@ -532,12 +565,14 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 					: toolName === 'control_references'
 						? ['action', 'file', 'occurrence']
 						: toolName === 'show_call_hierarchy'
-						? ['direction', 'symbol', 'file']
-						: toolName === 'go_to_definition'
-							? ['symbol', 'file', 'placement']
-							: toolName === 'control_editor'
-								? ['action']
-								: ['question'];
+							? ['direction', 'symbol', 'file']
+							: toolName === 'control_call_hierarchy'
+								? ['action', 'query', 'file']
+								: toolName === 'go_to_definition'
+									? ['symbol', 'file', 'placement']
+									: toolName === 'control_editor'
+										? ['action']
+										: ['question'];
 		if (Object.keys(value).some(key => !allowedKeys.includes(key))) {
 			return undefined;
 		}
@@ -567,6 +602,10 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			&& (typeof value.action !== 'string' || !REFERENCE_CONTROL_ACTIONS.includes(value.action as ReferenceControlAction))) {
 			return undefined;
 		}
+		if (toolName === 'control_call_hierarchy'
+			&& (typeof value.action !== 'string' || !CALL_HIERARCHY_CONTROL_ACTIONS.includes(value.action as CallHierarchyControlAction))) {
+			return undefined;
+		}
 		if (value.occurrence !== undefined
 			&& (!Number.isInteger(value.occurrence) || (value.occurrence as number) < 1)) {
 			return undefined;
@@ -590,6 +629,9 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			action: typeof value.action === 'string' ? value.action as EditorControlAction : undefined,
 			referenceAction: typeof value.action === 'string' && toolName === 'control_references'
 				? value.action as ReferenceControlAction
+				: undefined,
+			callHierarchyAction: typeof value.action === 'string' && toolName === 'control_call_hierarchy'
+				? value.action as CallHierarchyControlAction
 				: undefined,
 			direction: typeof value.direction === 'string' ? value.direction as CallHierarchyDirection : undefined,
 			occurrence: typeof value.occurrence === 'number' ? value.occurrence : undefined,

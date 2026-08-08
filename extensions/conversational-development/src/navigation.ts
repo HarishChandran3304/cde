@@ -40,6 +40,9 @@ export type EditorControlAction = typeof EDITOR_CONTROL_ACTIONS[number];
 export const CALL_HIERARCHY_DIRECTIONS = ['incoming', 'outgoing'] as const;
 export type CallHierarchyDirection = typeof CALL_HIERARCHY_DIRECTIONS[number];
 
+export const CALL_HIERARCHY_CONTROL_ACTIONS = ['next', 'previous', 'select', 'deeper', 'parent', 'show_incoming', 'show_outgoing', 'open', 'close'] as const;
+export type CallHierarchyControlAction = typeof CALL_HIERARCHY_CONTROL_ACTIONS[number];
+
 export const REFERENCE_CONTROL_ACTIONS = ['next', 'previous', 'select_file', 'open', 'close'] as const;
 export type ReferenceControlAction = typeof REFERENCE_CONTROL_ACTIONS[number];
 
@@ -114,6 +117,17 @@ interface WorkspaceSymbolCandidate {
 	readonly symbol: vscode.SymbolInformation;
 }
 
+interface CallHierarchyFrame {
+	readonly root: vscode.CallHierarchyItem;
+	readonly items: readonly vscode.CallHierarchyItem[];
+	index: number;
+}
+
+interface CallHierarchyNavigationState {
+	direction: CallHierarchyDirection;
+	frames: CallHierarchyFrame[];
+}
+
 export interface NavigationToolResult {
 	readonly ok: boolean;
 	readonly file?: string;
@@ -122,6 +136,8 @@ export interface NavigationToolResult {
 	readonly reference_count?: number;
 	readonly call_count?: number;
 	readonly calls?: readonly string[];
+	readonly call_direction?: CallHierarchyDirection;
+	readonly hierarchy_depth?: number;
 	readonly placement?: EditorPlacement;
 	readonly group_count?: number;
 	readonly spoken_response: string;
@@ -132,6 +148,7 @@ export class NavigationController {
 	private lastFile: vscode.Uri | undefined;
 	private lastSymbol: ResolvedNavigationTarget | undefined;
 	private lastReferences: readonly vscode.Location[] = [];
+	private callHierarchy: CallHierarchyNavigationState | undefined;
 
 	constructor(private readonly highlight: vscode.TextEditorDecorationType) { }
 
@@ -140,6 +157,7 @@ export class NavigationController {
 			const candidate = await this.resolveFile(query);
 			const document = await vscode.workspace.openTextDocument(candidate.uri);
 			await this.revealFile(document, placement);
+			this.clearTransientNavigation();
 			this.lastFile = candidate.uri;
 			return {
 				ok: true,
@@ -158,6 +176,7 @@ export class NavigationController {
 		try {
 			const target = await this.resolveSymbol(query, fileQuery);
 			await this.revealTarget(target, placement);
+			this.clearTransientNavigation();
 			this.rememberSymbol(target);
 			return {
 				ok: true,
@@ -195,6 +214,7 @@ export class NavigationController {
 				'peek',
 			);
 			this.lastReferences = [...references];
+			this.callHierarchy = undefined;
 			if (origin.symbolName) {
 				this.rememberSymbol(origin);
 			}
@@ -259,18 +279,24 @@ export class NavigationController {
 				throw new Error(`No call hierarchy is available for ${origin.symbolName ?? 'the selected symbol'}.`);
 			}
 
-			let callNames: string[];
+			let callItems: vscode.CallHierarchyItem[];
 			if (direction === 'incoming') {
 				const calls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[] | undefined>('vscode.provideIncomingCalls', root) ?? [];
-				callNames = calls.map(call => call.from.name);
+				callItems = calls.map(call => call.from);
 			} else {
 				const calls = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[] | undefined>('vscode.provideOutgoingCalls', root) ?? [];
-				callNames = calls.map(call => call.to.name);
+				callItems = calls.map(call => call.to);
 			}
+			const callNames = callItems.map(item => item.name);
 
 			await this.revealTarget(origin);
 			await vscode.commands.executeCommand('editor.showCallHierarchy');
 			await vscode.commands.executeCommand(direction === 'incoming' ? 'editor.showIncomingCalls' : 'editor.showOutgoingCalls');
+			this.callHierarchy = {
+				direction,
+				frames: [{ root, items: callItems, index: callItems.length > 0 ? 0 : -1 }],
+			};
+			this.lastReferences = [];
 			if (origin.symbolName) {
 				this.rememberSymbol(origin);
 			}
@@ -286,10 +312,50 @@ export class NavigationController {
 				symbol: origin.symbolName,
 				call_count: callNames.length,
 				calls: callNames,
+				call_direction: direction,
+				hierarchy_depth: 0,
 				spoken_response: spokenResponse,
 			};
 		} catch (error) {
 			return this.failure('I could not show the call hierarchy for that symbol.', error);
+		}
+	}
+
+	async controlCallHierarchy(action: CallHierarchyControlAction, query?: string, fileQuery?: string): Promise<NavigationToolResult> {
+		try {
+			const state = this.callHierarchy;
+			if (!state) {
+				throw new Error('Open a call hierarchy first.');
+			}
+
+			switch (action) {
+				case 'next':
+					return await this.moveCallHierarchy(1);
+				case 'previous':
+					return await this.moveCallHierarchy(-1);
+				case 'select':
+					return await this.selectCallHierarchyItem(query, fileQuery);
+				case 'deeper':
+					return await this.enterCallHierarchyItem();
+				case 'parent':
+					return await this.leaveCallHierarchyItem();
+				case 'show_incoming':
+					return await this.switchCallHierarchyDirection('incoming');
+				case 'show_outgoing':
+					return await this.switchCallHierarchyDirection('outgoing');
+				case 'open': {
+					const result = this.callHierarchyResult('Opened the selected call.');
+					await vscode.commands.executeCommand('list.select');
+					this.callHierarchy = undefined;
+					return result;
+				}
+				case 'close':
+					await vscode.commands.executeCommand('editor.closeCallHierarchy');
+					this.callHierarchy = undefined;
+					return { ok: true, spoken_response: 'Closed the call hierarchy.' };
+			}
+		} catch (error) {
+			return this.failure('I could not navigate that call hierarchy.', error);
 		}
 	}
 
@@ -305,6 +371,7 @@ export class NavigationController {
 			const target = destination ? await this.targetFromDefinition(destination, origin.symbolName) : origin;
 
 			await this.revealTarget(target, placement);
+			this.clearTransientNavigation();
 			this.rememberSymbol(target);
 			return {
 				ok: true,
@@ -322,6 +389,7 @@ export class NavigationController {
 
 	async controlEditor(action: EditorControlAction): Promise<NavigationToolResult> {
 		try {
+			this.clearTransientNavigation();
 			if (action === 'close_other_tabs') {
 				const group = vscode.window.tabGroups.activeTabGroup;
 				const otherTabs = group.tabs.filter(tab => tab !== group.activeTab);
@@ -378,6 +446,151 @@ export class NavigationController {
 		}
 
 		throw new Error(`The References view did not move to ${target.path}.`);
+	}
+
+	private async moveCallHierarchy(delta: -1 | 1): Promise<NavigationToolResult> {
+		const frame = this.currentCallHierarchyFrame();
+		if (frame.items.length === 0) {
+			return this.callHierarchyResult('There are no calls at this level.');
+		}
+
+		let nextIndex = frame.index + delta;
+		if (nextIndex < 0) {
+			await vscode.commands.executeCommand('list.focusDown', frame.items.length - 1);
+			nextIndex = frame.items.length - 1;
+		} else if (nextIndex >= frame.items.length) {
+			await vscode.commands.executeCommand('list.focusUp', frame.items.length - 1);
+			nextIndex = 0;
+		} else {
+			await vscode.commands.executeCommand(delta > 0 ? 'list.focusDown' : 'list.focusUp');
+		}
+		frame.index = nextIndex;
+		return this.callHierarchyResult(delta > 0 ? 'Showing the next call.' : 'Showing the previous call.');
+	}
+
+	private async selectCallHierarchyItem(query?: string, fileQuery?: string): Promise<NavigationToolResult> {
+		if (!query && !fileQuery) {
+			throw new Error('Name the caller, callee, or file you want to see.');
+		}
+		const frame = this.currentCallHierarchyFrame();
+		const candidates = frame.items.map((item, index) => ({
+			name: item.name,
+			path: vscode.workspace.asRelativePath(item.uri),
+			item,
+			index,
+		}));
+		const target = query
+			? rankSymbolCandidates(candidates, query, fileQuery)
+			: rankFileCandidates(candidates, fileQuery!);
+		if (!target) {
+			throw new Error(`No call at this level matches ${query ?? fileQuery}.`);
+		}
+
+		const delta = target.index - frame.index;
+		if (delta !== 0) {
+			await vscode.commands.executeCommand(delta > 0 ? 'list.focusDown' : 'list.focusUp', Math.abs(delta));
+			frame.index = target.index;
+		}
+		return this.callHierarchyResult(`Showing ${target.name} in ${target.path}.`);
+	}
+
+	private async enterCallHierarchyItem(): Promise<NavigationToolResult> {
+		const state = this.callHierarchy!;
+		const item = this.currentCallHierarchyItem();
+		if (!item) {
+			return this.callHierarchyResult('There is no call to follow from this level.');
+		}
+		const children = await this.resolveCallHierarchyItems(item, state.direction);
+		if (children.length === 0) {
+			return this.callHierarchyResult(`${item.name} has no ${state.direction === 'incoming' ? 'callers' : 'outgoing calls'}.`);
+		}
+
+		await vscode.commands.executeCommand('editor.refocusCallHierarchy');
+		state.frames.push({ root: item, items: children, index: 0 });
+		return this.callHierarchyResult(`Following ${item.name} one level deeper.`);
+	}
+
+	private async leaveCallHierarchyItem(): Promise<NavigationToolResult> {
+		const state = this.callHierarchy!;
+		if (state.frames.length <= 1) {
+			return this.callHierarchyResult('Already at the top of this call hierarchy.');
+		}
+
+		state.frames.pop();
+		const parentFrame = this.currentCallHierarchyFrame();
+		await this.restoreCallHierarchyFrame(parentFrame, state.direction);
+		return this.callHierarchyResult(`Returned to ${parentFrame.root.name}.`);
+	}
+
+	private async switchCallHierarchyDirection(direction: CallHierarchyDirection): Promise<NavigationToolResult> {
+		const state = this.callHierarchy!;
+		const root = this.currentCallHierarchyFrame().root;
+		const items = await this.resolveCallHierarchyItems(root, direction);
+		await vscode.commands.executeCommand(direction === 'incoming' ? 'editor.showIncomingCalls' : 'editor.showOutgoingCalls');
+		state.direction = direction;
+		state.frames = [{ root, items, index: items.length > 0 ? 0 : -1 }];
+		return this.callHierarchyResult(direction === 'incoming' ? `Showing callers of ${root.name}.` : `Showing calls from ${root.name}.`);
+	}
+
+	private async resolveCallHierarchyItems(item: vscode.CallHierarchyItem, direction: CallHierarchyDirection): Promise<vscode.CallHierarchyItem[]> {
+		if (direction === 'incoming') {
+			const calls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[] | undefined>('vscode.provideIncomingCalls', item) ?? [];
+			return calls.map(call => call.from);
+		}
+		const calls = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[] | undefined>('vscode.provideOutgoingCalls', item) ?? [];
+		return calls.map(call => call.to);
+	}
+
+	private async restoreCallHierarchyFrame(frame: CallHierarchyFrame, direction: CallHierarchyDirection): Promise<void> {
+		const document = await vscode.workspace.openTextDocument(frame.root.uri);
+		await vscode.window.showTextDocument(document, {
+			preview: false,
+			preserveFocus: false,
+			selection: frame.root.selectionRange,
+		});
+		await vscode.commands.executeCommand('editor.showCallHierarchy');
+		await vscode.commands.executeCommand(direction === 'incoming' ? 'editor.showIncomingCalls' : 'editor.showOutgoingCalls');
+		await delay(DOCUMENT_SYMBOL_RETRY_DELAY_MS);
+		if (frame.index > 0) {
+			await vscode.commands.executeCommand('list.focusDown', frame.index);
+		}
+	}
+
+	private currentCallHierarchyFrame(): CallHierarchyFrame {
+		const frames = this.callHierarchy?.frames;
+		if (!frames || frames.length === 0) {
+			throw new Error('Open a call hierarchy first.');
+		}
+		return frames[frames.length - 1];
+	}
+
+	private currentCallHierarchyItem(): vscode.CallHierarchyItem | undefined {
+		const frame = this.currentCallHierarchyFrame();
+		return frame.index >= 0 ? frame.items[frame.index] : undefined;
+	}
+
+	private callHierarchyResult(spokenResponse: string): NavigationToolResult {
+		const state = this.callHierarchy!;
+		const frame = this.currentCallHierarchyFrame();
+		const item = this.currentCallHierarchyItem();
+		return {
+			ok: true,
+			...(item ? {
+				file: vscode.workspace.asRelativePath(item.uri),
+				line: item.selectionRange.start.line + 1,
+				symbol: item.name,
+			} : {}),
+			call_count: frame.items.length,
+			calls: frame.items.map(candidate => candidate.name),
+			call_direction: state.direction,
+			hierarchy_depth: state.frames.length - 1,
+			spoken_response: spokenResponse,
+		};
+	}
+
+	private clearTransientNavigation(): void {
+		this.lastReferences = [];
+		this.callHierarchy = undefined;
 	}
 
 	private referenceResult(spokenResponse: string): NavigationToolResult {
