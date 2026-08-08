@@ -40,6 +40,9 @@ export type EditorControlAction = typeof EDITOR_CONTROL_ACTIONS[number];
 export const CALL_HIERARCHY_DIRECTIONS = ['incoming', 'outgoing'] as const;
 export type CallHierarchyDirection = typeof CALL_HIERARCHY_DIRECTIONS[number];
 
+export const REFERENCE_CONTROL_ACTIONS = ['next', 'previous', 'select_file', 'open', 'close'] as const;
+export type ReferenceControlAction = typeof REFERENCE_CONTROL_ACTIONS[number];
+
 const EDITOR_ACTION_COMMANDS: Readonly<Record<Exclude<EditorControlAction, 'close_other_tabs' | 'close_other_groups'>, string>> = {
 	split_left: 'workbench.action.splitEditorLeft',
 	split_right: 'workbench.action.splitEditorRight',
@@ -128,6 +131,7 @@ export interface NavigationToolResult {
 export class NavigationController {
 	private lastFile: vscode.Uri | undefined;
 	private lastSymbol: ResolvedNavigationTarget | undefined;
+	private lastReferences: readonly vscode.Location[] = [];
 
 	constructor(private readonly highlight: vscode.TextEditorDecorationType) { }
 
@@ -190,6 +194,7 @@ export class NavigationController {
 				references,
 				'peek',
 			);
+			this.lastReferences = [...references];
 			if (origin.symbolName) {
 				this.rememberSymbol(origin);
 			}
@@ -204,6 +209,40 @@ export class NavigationController {
 			};
 		} catch (error) {
 			return this.failure('I could not show references for that symbol.', error);
+		}
+	}
+
+	async controlReferences(action: ReferenceControlAction, fileQuery?: string): Promise<NavigationToolResult> {
+		try {
+			if (this.lastReferences.length === 0) {
+				throw new Error('Open references for a symbol first.');
+			}
+
+			switch (action) {
+				case 'next':
+					await vscode.commands.executeCommand('goToNextReference');
+					return this.referenceResult('Showing the next reference.');
+				case 'previous':
+					await vscode.commands.executeCommand('goToPreviousReference');
+					return this.referenceResult('Showing the previous reference.');
+				case 'select_file':
+					if (!fileQuery) {
+						throw new Error('Name the file whose reference you want to see.');
+					}
+					return await this.selectReferenceFile(fileQuery);
+				case 'open': {
+					const result = this.referenceResult('Opened the current reference.');
+					await vscode.commands.executeCommand('closeReferenceSearch');
+					this.lastReferences = [];
+					return result;
+				}
+				case 'close':
+					await vscode.commands.executeCommand('closeReferenceSearch');
+					this.lastReferences = [];
+					return { ok: true, spoken_response: 'Closed references.' };
+			}
+		} catch (error) {
+			return this.failure('I could not navigate those references.', error);
 		}
 	}
 
@@ -311,6 +350,55 @@ export class NavigationController {
 
 	openPreparedCheckout(): Promise<NavigationToolResult> {
 		return this.openSymbol('calculateFinalPrice', 'src/checkout.ts');
+	}
+
+	private async selectReferenceFile(fileQuery: string): Promise<NavigationToolResult> {
+		const candidates = this.lastReferences.map(location => ({
+			path: vscode.workspace.asRelativePath(location.uri),
+			location,
+		}));
+		const target = rankFileCandidates(candidates, fileQuery);
+		if (!target) {
+			throw new Error(`No reference result matches ${fileQuery}.`);
+		}
+
+		for (let attempt = 0; attempt <= this.lastReferences.length; attempt++) {
+			const current = this.currentReferenceLocation();
+			if (current && current.uri.toString() === target.location.uri.toString()) {
+				return this.referenceResult(`Showing the reference in ${target.path}.`);
+			}
+			await vscode.commands.executeCommand('goToNextReference');
+		}
+
+		throw new Error(`The References view did not move to ${target.path}.`);
+	}
+
+	private referenceResult(spokenResponse: string): NavigationToolResult {
+		const location = this.currentReferenceLocation();
+		return {
+			ok: true,
+			...(location ? {
+				file: vscode.workspace.asRelativePath(location.uri),
+				line: location.range.start.line + 1,
+			} : {}),
+			reference_count: this.lastReferences.length,
+			spoken_response: spokenResponse,
+		};
+	}
+
+	private currentReferenceLocation(): vscode.Location | undefined {
+		const editor = vscode.window.activeTextEditor;
+		if (!editor) {
+			return undefined;
+		}
+		const matchingFile = this.lastReferences.filter(reference => reference.uri.toString() === editor.document.uri.toString());
+		return matchingFile.sort((left, right) => {
+			const leftDistance = Math.abs(left.range.start.line - editor.selection.active.line) * 1_000
+				+ Math.abs(left.range.start.character - editor.selection.active.character);
+			const rightDistance = Math.abs(right.range.start.line - editor.selection.active.line) * 1_000
+				+ Math.abs(right.range.start.character - editor.selection.active.character);
+			return leftDistance - rightDistance;
+		})[0];
 	}
 
 	private async resolveFile(query: string): Promise<WorkspaceFileCandidate> {

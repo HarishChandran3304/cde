@@ -15,13 +15,15 @@ import {
 	EditorPlacement,
 	NavigationController,
 	NavigationToolResult,
+	REFERENCE_CONTROL_ACTIONS,
+	ReferenceControlAction,
 } from './navigation';
 import { WalkthroughController } from './walkthrough';
 
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
-type CdeToolName = 'open_file' | 'open_symbol' | 'show_references' | 'show_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
+type CdeToolName = 'open_file' | 'open_symbol' | 'show_references' | 'control_references' | 'show_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
 
 interface CdeToolArguments {
 	readonly query?: string;
@@ -30,6 +32,7 @@ interface CdeToolArguments {
 	readonly file?: string;
 	readonly placement?: EditorPlacement;
 	readonly action?: EditorControlAction;
+	readonly referenceAction?: ReferenceControlAction;
 	readonly direction?: CallHierarchyDirection;
 }
 
@@ -45,10 +48,11 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused conversational-development experiment. You have exactly eight useful tools.
+This is a focused conversational-development experiment. You have exactly nine useful tools.
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
 - Use show_references for generic references or usages. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
+- Use control_references after show_references when the user says next reference, previous reference, open this reference, close references, or asks for a reference in a particular file. For requests like "show me the one in checkout.js", use select_file and pass the user's filename or module phrase as file.
 - Use show_call_hierarchy with incoming for actual callers and outgoing for functions called by the target. Do not use generic references when the user specifically says callers, callees, incoming calls, or outgoing calls.
 - Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
 - Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
@@ -151,6 +155,27 @@ This is a focused conversational-development experiment. You have exactly eight 
 						type: 'string',
 						enum: EDITOR_CONTROL_ACTIONS,
 						description: 'The deterministic editor action to execute.',
+					},
+				},
+				required: ['action'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'control_references',
+			description: 'Navigate within the currently open native References Peek view, including semantic file selection.',
+			parameters: {
+				type: 'object',
+				properties: {
+					action: {
+						type: 'string',
+						enum: REFERENCE_CONTROL_ACTIONS,
+						description: 'Next or previous moves through results; select_file finds a result by filename; open keeps the selected result and closes Peek; close dismisses Peek.',
+					},
+					file: {
+						type: 'string',
+						description: 'A filename, path, or module phrase. Required only for select_file.',
 					},
 				},
 				required: ['action'],
@@ -373,6 +398,9 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				case 'show_references':
 					result = await this.navigation.showReferences(argumentsValue.symbol, argumentsValue.file);
 					break;
+				case 'control_references':
+					result = await this.navigation.controlReferences(argumentsValue.referenceAction!, argumentsValue.file);
+					break;
 				case 'show_call_hierarchy':
 					result = await this.navigation.showCallHierarchy(argumentsValue.direction!, argumentsValue.symbol, argumentsValue.file);
 					break;
@@ -474,7 +502,8 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 function isCdeToolName(name: string): name is CdeToolName {
 	return name === 'open_file'
 		|| name === 'open_symbol'
-		|| name === 'show_references'
+			|| name === 'show_references'
+			|| name === 'control_references'
 		|| name === 'show_call_hierarchy'
 		|| name === 'go_to_definition'
 		|| name === 'control_editor'
@@ -494,7 +523,9 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 				? ['query', 'file', 'placement']
 				: toolName === 'show_references'
 					? ['symbol', 'file']
-					: toolName === 'show_call_hierarchy'
+					: toolName === 'control_references'
+						? ['action', 'file']
+						: toolName === 'show_call_hierarchy'
 						? ['direction', 'symbol', 'file']
 						: toolName === 'go_to_definition'
 							? ['symbol', 'file', 'placement']
@@ -523,6 +554,15 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			&& (typeof value.action !== 'string' || !EDITOR_CONTROL_ACTIONS.includes(value.action as EditorControlAction))) {
 			return undefined;
 		}
+		if (toolName === 'control_references'
+			&& (typeof value.action !== 'string' || !REFERENCE_CONTROL_ACTIONS.includes(value.action as ReferenceControlAction))) {
+			return undefined;
+		}
+		if (toolName === 'control_references'
+			&& value.action === 'select_file'
+			&& typeof value.file !== 'string') {
+			return undefined;
+		}
 		if (toolName === 'show_call_hierarchy'
 			&& (typeof value.direction !== 'string' || !CALL_HIERARCHY_DIRECTIONS.includes(value.direction as CallHierarchyDirection))) {
 			return undefined;
@@ -535,6 +575,9 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			file: typeof value.file === 'string' ? value.file.trim() : undefined,
 			placement: typeof value.placement === 'string' ? value.placement as EditorPlacement : undefined,
 			action: typeof value.action === 'string' ? value.action as EditorControlAction : undefined,
+			referenceAction: typeof value.action === 'string' && toolName === 'control_references'
+				? value.action as ReferenceControlAction
+				: undefined,
 			direction: typeof value.direction === 'string' ? value.direction as CallHierarchyDirection : undefined,
 		};
 	} catch {

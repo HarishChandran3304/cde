@@ -18,6 +18,7 @@ const files = [
 test('ranks exact paths, filenames, and spoken file names', () => {
 	assert.equal(rankFileCandidates(files, 'src/checkout.ts')?.path, 'src/checkout.ts');
 	assert.equal(rankFileCandidates(files, 'checkout.ts')?.path, 'src/checkout.ts');
+	assert.equal(rankFileCandidates(files, 'show me the one in checkout.js')?.path, 'src/checkout.ts');
 	assert.equal(rankFileCandidates(files, 'open the checkout service')?.path, 'src/checkout.ts');
 	assert.equal(rankFileCandidates(files, 'the cart summary')?.path, 'src/cart/cart-summary.ts');
 	assert.equal(rankFileCandidates(files, 'order draft')?.path, 'src/orders/order-draft.ts');
