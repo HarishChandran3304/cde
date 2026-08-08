@@ -4,17 +4,26 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { NavigationController, NavigationToolResult } from './navigation';
+import {
+	EDITOR_CONTROL_ACTIONS,
+	EDITOR_PLACEMENTS,
+	EditorControlAction,
+	EditorPlacement,
+	NavigationController,
+	NavigationToolResult,
+} from './navigation';
 
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
-type NavigationToolName = 'open_file' | 'open_symbol' | 'show_references' | 'go_to_definition';
+type NavigationToolName = 'open_file' | 'open_symbol' | 'show_references' | 'go_to_definition' | 'control_editor';
 
 interface NavigationToolArguments {
 	readonly query?: string;
 	readonly symbol?: string;
 	readonly file?: string;
+	readonly placement?: EditorPlacement;
+	readonly action?: EditorControlAction;
 }
 
 type WebviewMessage =
@@ -27,11 +36,12 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused code-navigation experiment. You have exactly four useful tools.
-- Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts".
-- Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint.
+This is a focused code-navigation experiment. You have exactly five useful tools.
+- Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
+- Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
 - Use show_references for references, usages, or callers. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
-- Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups.
+- Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
+- Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
 - Treat "open the checkout service" as open_file with query "checkout" and "where is the final price calculated" as open_symbol with query "calculateFinalPrice".
 - Never claim an editor action happened before its tool succeeds.
 - Do not speak before calling the tool.
@@ -64,6 +74,11 @@ This is a focused code-navigation experiment. You have exactly four useful tools
 						type: 'string',
 						description: 'A concise filename, path, or module phrase.',
 					},
+					placement: {
+						type: 'string',
+						enum: EDITOR_PLACEMENTS,
+						description: 'Where to open the file. Omit for the current editor.',
+					},
 				},
 				required: ['query'],
 				additionalProperties: false,
@@ -83,6 +98,11 @@ This is a focused code-navigation experiment. You have exactly four useful tools
 					file: {
 						type: 'string',
 						description: 'Optional filename or path hint.',
+					},
+					placement: {
+						type: 'string',
+						enum: EDITOR_PLACEMENTS,
+						description: 'Where to open the symbol. Omit for the current editor.',
 					},
 				},
 				required: ['query'],
@@ -110,6 +130,23 @@ This is a focused code-navigation experiment. You have exactly four useful tools
 		},
 		{
 			type: 'function',
+			name: 'control_editor',
+			description: 'Control editor layout, focus, tabs, groups, and navigation history.',
+			parameters: {
+				type: 'object',
+				properties: {
+					action: {
+						type: 'string',
+						enum: EDITOR_CONTROL_ACTIONS,
+						description: 'The deterministic editor action to execute.',
+					},
+				},
+				required: ['action'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
 			name: 'go_to_definition',
 			description: 'Go to the definition of an explicit, selected, or recently opened symbol.',
 			parameters: {
@@ -122,6 +159,11 @@ This is a focused code-navigation experiment. You have exactly four useful tools
 					file: {
 						type: 'string',
 						description: 'Optional filename or path hint for the explicit symbol.',
+					},
+					placement: {
+						type: 'string',
+						enum: EDITOR_PLACEMENTS,
+						description: 'Where to open the definition. Omit for the current editor.',
 					},
 				},
 				additionalProperties: false,
@@ -235,16 +277,19 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		} else {
 			switch (message.name) {
 				case 'open_file':
-					result = await this.navigation.openFile(argumentsValue.query!);
+					result = await this.navigation.openFile(argumentsValue.query!, argumentsValue.placement);
 					break;
 				case 'open_symbol':
-					result = await this.navigation.openSymbol(argumentsValue.query!, argumentsValue.file);
+					result = await this.navigation.openSymbol(argumentsValue.query!, argumentsValue.file, argumentsValue.placement);
 					break;
 				case 'show_references':
 					result = await this.navigation.showReferences(argumentsValue.symbol, argumentsValue.file);
 					break;
 				case 'go_to_definition':
-					result = await this.navigation.goToDefinition(argumentsValue.symbol, argumentsValue.file);
+					result = await this.navigation.goToDefinition(argumentsValue.symbol, argumentsValue.file, argumentsValue.placement);
+					break;
+				case 'control_editor':
+					result = await this.navigation.controlEditor(argumentsValue.action!);
 					break;
 			}
 		}
@@ -313,7 +358,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 }
 
 function isNavigationToolName(name: string): name is NavigationToolName {
-	return name === 'open_file' || name === 'open_symbol' || name === 'show_references' || name === 'go_to_definition';
+	return name === 'open_file' || name === 'open_symbol' || name === 'show_references' || name === 'go_to_definition' || name === 'control_editor';
 }
 
 function parseNavigationToolArguments(toolName: NavigationToolName, serializedArguments: string): NavigationToolArguments | undefined {
@@ -324,10 +369,14 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 		}
 
 		const allowedKeys = toolName === 'open_file'
-			? ['query']
+			? ['query', 'placement']
 			: toolName === 'open_symbol'
-				? ['query', 'file']
-				: ['symbol', 'file'];
+				? ['query', 'file', 'placement']
+				: toolName === 'show_references'
+					? ['symbol', 'file']
+					: toolName === 'go_to_definition'
+						? ['symbol', 'file', 'placement']
+						: ['action'];
 		if (Object.keys(value).some(key => !allowedKeys.includes(key))) {
 			return undefined;
 		}
@@ -340,11 +389,20 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 		if ((toolName === 'open_file' || toolName === 'open_symbol') && typeof value.query !== 'string') {
 			return undefined;
 		}
+		if (typeof value.placement === 'string' && !EDITOR_PLACEMENTS.includes(value.placement as EditorPlacement)) {
+			return undefined;
+		}
+		if (toolName === 'control_editor'
+			&& (typeof value.action !== 'string' || !EDITOR_CONTROL_ACTIONS.includes(value.action as EditorControlAction))) {
+			return undefined;
+		}
 
 		return {
 			query: typeof value.query === 'string' ? value.query.trim() : undefined,
 			symbol: typeof value.symbol === 'string' ? value.symbol.trim() : undefined,
 			file: typeof value.file === 'string' ? value.file.trim() : undefined,
+			placement: typeof value.placement === 'string' ? value.placement as EditorPlacement : undefined,
+			action: typeof value.action === 'string' ? value.action as EditorControlAction : undefined,
 		};
 	} catch {
 		return undefined;

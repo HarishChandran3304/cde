@@ -10,6 +10,80 @@ const DOCUMENT_SYMBOL_RETRY_DELAY_MS = 250;
 const FILE_SEARCH_EXCLUDE = '**/{.git,node_modules,out,dist,build,.build,.vscode-test}/**';
 const MAX_WORKSPACE_FILES = 20_000;
 
+export const EDITOR_PLACEMENTS = ['current', 'beside', 'left', 'right', 'below'] as const;
+export type EditorPlacement = typeof EDITOR_PLACEMENTS[number];
+
+export const EDITOR_CONTROL_ACTIONS = [
+	'split_left',
+	'split_right',
+	'split_down',
+	'focus_left',
+	'focus_right',
+	'focus_above',
+	'focus_below',
+	'move_tab_left',
+	'move_tab_right',
+	'move_tab_above',
+	'move_tab_below',
+	'move_group_left',
+	'move_group_right',
+	'close_active',
+	'close_other_tabs',
+	'close_other_groups',
+	'close_group',
+	'pin_active',
+	'back',
+	'forward',
+] as const;
+export type EditorControlAction = typeof EDITOR_CONTROL_ACTIONS[number];
+
+export const CALL_HIERARCHY_DIRECTIONS = ['incoming', 'outgoing'] as const;
+export type CallHierarchyDirection = typeof CALL_HIERARCHY_DIRECTIONS[number];
+
+const EDITOR_ACTION_COMMANDS: Readonly<Record<Exclude<EditorControlAction, 'close_other_tabs' | 'close_other_groups'>, string>> = {
+	split_left: 'workbench.action.splitEditorLeft',
+	split_right: 'workbench.action.splitEditorRight',
+	split_down: 'workbench.action.splitEditorDown',
+	focus_left: 'workbench.action.focusLeftGroup',
+	focus_right: 'workbench.action.focusRightGroup',
+	focus_above: 'workbench.action.focusAboveGroup',
+	focus_below: 'workbench.action.focusBelowGroup',
+	move_tab_left: 'workbench.action.moveEditorToLeftGroup',
+	move_tab_right: 'workbench.action.moveEditorToRightGroup',
+	move_tab_above: 'workbench.action.moveEditorToAboveGroup',
+	move_tab_below: 'workbench.action.moveEditorToBelowGroup',
+	move_group_left: 'workbench.action.moveActiveEditorGroupLeft',
+	move_group_right: 'workbench.action.moveActiveEditorGroupRight',
+	close_active: 'workbench.action.closeActiveEditor',
+	close_group: 'workbench.action.closeGroup',
+	pin_active: 'workbench.action.pinEditor',
+	back: 'workbench.action.navigateBack',
+	forward: 'workbench.action.navigateForward',
+};
+
+const EDITOR_ACTION_RESPONSES: Readonly<Record<EditorControlAction, string>> = {
+	split_left: 'Split the editor to the left.',
+	split_right: 'Split the editor to the right.',
+	split_down: 'Split the editor below.',
+	focus_left: 'Focused the editor on the left.',
+	focus_right: 'Focused the editor on the right.',
+	focus_above: 'Focused the editor above.',
+	focus_below: 'Focused the editor below.',
+	move_tab_left: 'Moved this tab to the left.',
+	move_tab_right: 'Moved this tab to the right.',
+	move_tab_above: 'Moved this tab above.',
+	move_tab_below: 'Moved this tab below.',
+	move_group_left: 'Moved this editor group to the left.',
+	move_group_right: 'Moved this editor group to the right.',
+	close_active: 'Closed the active tab.',
+	close_other_tabs: 'Closed the other tabs in this group.',
+	close_other_groups: 'Closed the other editor groups.',
+	close_group: 'Closed the active editor group.',
+	pin_active: 'Pinned the active tab.',
+	back: 'Went back.',
+	forward: 'Went forward.',
+};
+
 interface SymbolNode {
 	readonly name: string;
 	readonly range?: vscode.Range;
@@ -43,6 +117,10 @@ export interface NavigationToolResult {
 	readonly line?: number;
 	readonly symbol?: string;
 	readonly reference_count?: number;
+	readonly call_count?: number;
+	readonly calls?: readonly string[];
+	readonly placement?: EditorPlacement;
+	readonly group_count?: number;
 	readonly spoken_response: string;
 	readonly error?: string;
 }
@@ -53,34 +131,38 @@ export class NavigationController {
 
 	constructor(private readonly highlight: vscode.TextEditorDecorationType) { }
 
-	async openFile(query: string): Promise<NavigationToolResult> {
+	async openFile(query: string, placement: EditorPlacement = 'current'): Promise<NavigationToolResult> {
 		try {
 			const candidate = await this.resolveFile(query);
 			const document = await vscode.workspace.openTextDocument(candidate.uri);
-			await this.revealFile(document);
+			await this.revealFile(document, placement);
 			this.lastFile = candidate.uri;
 			return {
 				ok: true,
 				file: candidate.path,
 				line: 1,
-				spoken_response: `Opened ${candidate.path}.`,
+				placement,
+				group_count: vscode.window.tabGroups.all.length,
+				spoken_response: `Opened ${candidate.path}${placementPhrase(placement)}.`,
 			};
 		} catch (error) {
 			return this.failure(`I could not find a file matching ${query}.`, error);
 		}
 	}
 
-	async openSymbol(query: string, fileQuery?: string): Promise<NavigationToolResult> {
+	async openSymbol(query: string, fileQuery?: string, placement: EditorPlacement = 'current'): Promise<NavigationToolResult> {
 		try {
 			const target = await this.resolveSymbol(query, fileQuery);
-			await this.revealTarget(target);
+			await this.revealTarget(target, placement);
 			this.rememberSymbol(target);
 			return {
 				ok: true,
 				file: vscode.workspace.asRelativePath(target.uri),
 				line: target.selectionRange.start.line + 1,
 				symbol: target.symbolName,
-				spoken_response: `Opened ${target.symbolName ?? query}.`,
+				placement,
+				group_count: vscode.window.tabGroups.all.length,
+				spoken_response: `Opened ${target.symbolName ?? query}${placementPhrase(placement)}.`,
 			};
 		} catch (error) {
 			return this.failure(`I could not find the symbol ${query}.`, error);
@@ -125,7 +207,7 @@ export class NavigationController {
 		}
 	}
 
-	async goToDefinition(symbolQuery?: string, fileQuery?: string): Promise<NavigationToolResult> {
+	async goToDefinition(symbolQuery?: string, fileQuery?: string, placement: EditorPlacement = 'current'): Promise<NavigationToolResult> {
 		try {
 			const origin = await this.resolveOrigin(symbolQuery, fileQuery);
 			const definitions = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[] | undefined>(
@@ -136,17 +218,47 @@ export class NavigationController {
 			const destination = this.preferredDefinition(definitions);
 			const target = destination ? await this.targetFromDefinition(destination, origin.symbolName) : origin;
 
-			await this.revealTarget(target);
+			await this.revealTarget(target, placement);
 			this.rememberSymbol(target);
 			return {
 				ok: true,
 				file: vscode.workspace.asRelativePath(target.uri),
 				line: target.selectionRange.start.line + 1,
 				symbol: target.symbolName,
-				spoken_response: `Opened the definition of ${target.symbolName ?? 'that symbol'}.`,
+				placement,
+				group_count: vscode.window.tabGroups.all.length,
+				spoken_response: `Opened the definition of ${target.symbolName ?? 'that symbol'}${placementPhrase(placement)}.`,
 			};
 		} catch (error) {
 			return this.failure('I could not find that definition.', error);
+		}
+	}
+
+	async controlEditor(action: EditorControlAction): Promise<NavigationToolResult> {
+		try {
+			if (action === 'close_other_tabs') {
+				const group = vscode.window.tabGroups.activeTabGroup;
+				const otherTabs = group.tabs.filter(tab => tab !== group.activeTab);
+				if (otherTabs.length > 0) {
+					await vscode.window.tabGroups.close(otherTabs, true);
+				}
+			} else if (action === 'close_other_groups') {
+				const activeGroup = vscode.window.tabGroups.activeTabGroup;
+				const otherGroups = vscode.window.tabGroups.all.filter(group => group !== activeGroup);
+				if (otherGroups.length > 0) {
+					await vscode.window.tabGroups.close(otherGroups, true);
+				}
+			} else {
+				await vscode.commands.executeCommand(EDITOR_ACTION_COMMANDS[action]);
+			}
+
+			return {
+				ok: true,
+				group_count: vscode.window.tabGroups.all.length,
+				spoken_response: EDITOR_ACTION_RESPONSES[action],
+			};
+		} catch (error) {
+			return this.failure('I could not complete that editor action.', error);
 		}
 	}
 
@@ -364,21 +476,55 @@ export class NavigationController {
 		return this.targetFromLocation(document, definition.range, symbolName);
 	}
 
-	private async revealFile(document: vscode.TextDocument): Promise<void> {
+	private async revealFile(document: vscode.TextDocument, placement: EditorPlacement): Promise<void> {
 		this.clearHighlights();
-		await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+		const viewColumn = await this.resolveViewColumn(placement);
+		await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false, viewColumn });
 	}
 
-	private async revealTarget(target: ResolvedNavigationTarget): Promise<void> {
+	private async revealTarget(target: ResolvedNavigationTarget, placement: EditorPlacement = 'current'): Promise<void> {
 		this.clearHighlights();
+		const viewColumn = await this.resolveViewColumn(placement);
 		const editor = await vscode.window.showTextDocument(target.document, {
 			preview: false,
 			preserveFocus: false,
 			selection: target.selectionRange,
+			viewColumn,
 		});
 		editor.selection = new vscode.Selection(target.selectionRange.start, target.selectionRange.end);
 		editor.setDecorations(this.highlight, [target.highlightRange]);
 		editor.revealRange(target.highlightRange, vscode.TextEditorRevealType.InCenter);
+	}
+
+	private async resolveViewColumn(placement: EditorPlacement): Promise<vscode.ViewColumn> {
+		if (placement === 'current') {
+			return vscode.ViewColumn.Active;
+		}
+		if (placement === 'beside') {
+			return vscode.ViewColumn.Beside;
+		}
+
+		const activeGroup = vscode.window.tabGroups.activeTabGroup;
+		const groups = vscode.window.tabGroups.all;
+		if (placement === 'left') {
+			const leftGroup = groups
+				.filter(group => group.viewColumn < activeGroup.viewColumn)
+				.sort((left, right) => right.viewColumn - left.viewColumn)[0];
+			if (leftGroup) {
+				return leftGroup.viewColumn;
+			}
+			await vscode.commands.executeCommand('workbench.action.splitEditorLeft');
+			return vscode.ViewColumn.Active;
+		}
+		if (placement === 'right') {
+			const rightGroup = groups
+				.filter(group => group.viewColumn > activeGroup.viewColumn)
+				.sort((left, right) => left.viewColumn - right.viewColumn)[0];
+			return rightGroup?.viewColumn ?? vscode.ViewColumn.Beside;
+		}
+
+		await vscode.commands.executeCommand('workbench.action.splitEditorDown');
+		return vscode.ViewColumn.Active;
 	}
 
 	private clearHighlights(): void {
@@ -409,4 +555,14 @@ function definitionUri(definition: vscode.Location | vscode.LocationLink): vscod
 
 function delay(durationMs: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, durationMs));
+}
+
+function placementPhrase(placement: EditorPlacement): string {
+	switch (placement) {
+		case 'current': return '';
+		case 'beside': return ' beside the current editor';
+		case 'left': return ' on the left';
+		case 'right': return ' on the right';
+		case 'below': return ' below the current editor';
+	}
 }
