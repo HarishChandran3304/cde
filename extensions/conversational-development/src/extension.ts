@@ -4,54 +4,17 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { NavigationController, NavigationToolResult } from './navigation';
 
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
-const DOCUMENT_SYMBOL_RETRY_DELAY_MS = 250;
 
-interface CodeTarget {
-	readonly file: string;
-	readonly symbol: string;
-	readonly fallbackAnchor: string;
-	readonly spokenName: string;
-}
+type NavigationToolName = 'open_file' | 'open_symbol' | 'show_references' | 'go_to_definition';
 
-const CODE_TARGETS = {
-	checkout_final_price: {
-		file: 'src/checkout.ts',
-		symbol: 'calculateFinalPrice',
-		fallbackAnchor: 'export function calculateFinalPrice',
-		spokenName: 'calculateFinalPrice',
-	},
-} as const satisfies Record<string, CodeTarget>;
-
-type CodeTargetId = keyof typeof CODE_TARGETS;
-const CODE_TARGET_IDS = Object.keys(CODE_TARGETS) as CodeTargetId[];
-type CodeToolName = 'open_code_target' | 'show_code_references';
-
-interface SymbolNode {
-	readonly name: string;
-	readonly range?: vscode.Range;
-	readonly selectionRange?: vscode.Range;
-	readonly location?: vscode.Location;
-	readonly children?: readonly SymbolNode[];
-}
-
-interface ResolvedCodeTarget {
-	readonly uri: vscode.Uri;
-	readonly document: vscode.TextDocument;
-	readonly selectionRange: vscode.Range;
-	readonly highlightRange: vscode.Range;
-}
-
-interface ToolResult {
-	readonly ok: boolean;
-	readonly target?: CodeTargetId;
+interface NavigationToolArguments {
+	readonly query?: string;
+	readonly symbol?: string;
 	readonly file?: string;
-	readonly line?: number;
-	readonly reference_count?: number;
-	readonly spoken_response: string;
-	readonly error?: string;
 }
 
 type WebviewMessage =
@@ -64,14 +27,16 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused code-navigation experiment. You have exactly two useful tools.
-- When the user asks to open, navigate to, find, or show the checkout price calculation, call open_code_target with checkout_final_price immediately.
-- When the user asks for references, usages, or callers of calculateFinalPrice, call show_code_references with checkout_final_price immediately.
-- Treat natural paraphrases such as "open the checkout service", "where is checkout calculated", and "show every caller" as the matching tool request.
+This is a focused code-navigation experiment. You have exactly four useful tools.
+- Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts".
+- Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint.
+- Use show_references for references, usages, or callers. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
+- Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups.
+- Treat "open the checkout service" as open_file with query "checkout" and "where is the final price calculated" as open_symbol with query "calculateFinalPrice".
 - Never claim an editor action happened before its tool succeeds.
 - Do not speak before calling the tool.
 - When the tool returns, say its spoken_response exactly and add nothing.
-- For unrelated requests, briefly say this experiment only navigates the prepared checkout code.`,
+- For unrelated requests, briefly say this experiment currently handles code navigation only.`,
 	audio: {
 		input: {
 			transcription: { model: 'gpt-4o-mini-transcribe' },
@@ -90,33 +55,75 @@ This is a focused code-navigation experiment. You have exactly two useful tools.
 	tools: [
 		{
 			type: 'function',
-			name: 'open_code_target',
-			description: 'Open and highlight calculateFinalPrice in the prepared checkout file.',
+			name: 'open_file',
+			description: 'Fuzzy-find and open a file anywhere in the current workspace.',
 			parameters: {
 				type: 'object',
 				properties: {
-					target: {
+					query: {
 						type: 'string',
-						enum: CODE_TARGET_IDS,
+						description: 'A concise filename, path, or module phrase.',
 					},
 				},
-				required: ['target'],
+				required: ['query'],
 				additionalProperties: false,
 			},
 		},
 		{
 			type: 'function',
-			name: 'show_code_references',
-			description: 'Find and show the native References peek for calculateFinalPrice, including its callers.',
+			name: 'open_symbol',
+			description: 'Find, open, select, and highlight a named workspace symbol.',
 			parameters: {
 				type: 'object',
 				properties: {
-					target: {
+					query: {
 						type: 'string',
-						enum: CODE_TARGET_IDS,
+						description: 'The source symbol name to find.',
+					},
+					file: {
+						type: 'string',
+						description: 'Optional filename or path hint.',
 					},
 				},
-				required: ['target'],
+				required: ['query'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'show_references',
+			description: 'Show native VS Code references for an explicit, selected, or recently opened symbol.',
+			parameters: {
+				type: 'object',
+				properties: {
+					symbol: {
+						type: 'string',
+						description: 'Optional explicit source symbol name. Omit for contextual follow-ups.',
+					},
+					file: {
+						type: 'string',
+						description: 'Optional filename or path hint for the explicit symbol.',
+					},
+				},
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'go_to_definition',
+			description: 'Go to the definition of an explicit, selected, or recently opened symbol.',
+			parameters: {
+				type: 'object',
+				properties: {
+					symbol: {
+						type: 'string',
+						description: 'Optional explicit source symbol name. Omit for contextual follow-ups.',
+					},
+					file: {
+						type: 'string',
+						description: 'Optional filename or path hint for the explicit symbol.',
+					},
+				},
 				additionalProperties: false,
 			},
 		},
@@ -131,7 +138,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly output: vscode.OutputChannel,
-		private readonly highlight: vscode.TextEditorDecorationType,
+		private readonly navigation: NavigationController,
 	) { }
 
 	resolveWebviewView(view: vscode.WebviewView): void {
@@ -154,7 +161,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				await this.executeTool(message);
 				return;
 			case 'openCheckoutDirectly': {
-				const result = await openCheckoutLogic(this.highlight);
+				const result = await this.navigation.openPreparedCheckout();
 				this.trace(`direct.result ${JSON.stringify(result)}`);
 				await this.post({ type: 'directResult', requestId: message.requestId, result });
 				return;
@@ -211,24 +218,35 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 
 	private async executeTool(message: Extract<WebviewMessage, { type: 'executeTool' }>): Promise<void> {
 		this.trace(`tool.call ${message.name} ${message.arguments}`);
-		let result: ToolResult;
-		const targetId = isCodeToolName(message.name) ? parseCodeTargetArguments(message.arguments) : undefined;
-		if (message.name === 'open_code_target' && targetId) {
-			result = await openCodeTarget(targetId, this.highlight);
-		} else if (message.name === 'show_code_references' && targetId) {
-			result = await showCodeReferences(targetId, this.highlight);
-		} else if (isCodeToolName(message.name)) {
-			result = {
-				ok: false,
-				spoken_response: 'I could not find that code target.',
-				error: `Invalid arguments for ${message.name}.`,
-			};
-		} else {
+		let result: NavigationToolResult;
+		const argumentsValue = isNavigationToolName(message.name) ? parseNavigationToolArguments(message.name, message.arguments) : undefined;
+		if (!isNavigationToolName(message.name)) {
 			result = {
 				ok: false,
 				spoken_response: 'That tool is not available in this experiment.',
 				error: `Unknown tool: ${message.name}`,
 			};
+		} else if (!argumentsValue) {
+			result = {
+				ok: false,
+				spoken_response: 'I could not understand that navigation request.',
+				error: `Invalid arguments for ${message.name}.`,
+			};
+		} else {
+			switch (message.name) {
+				case 'open_file':
+					result = await this.navigation.openFile(argumentsValue.query!);
+					break;
+				case 'open_symbol':
+					result = await this.navigation.openSymbol(argumentsValue.query!, argumentsValue.file);
+					break;
+				case 'show_references':
+					result = await this.navigation.showReferences(argumentsValue.symbol, argumentsValue.file);
+					break;
+				case 'go_to_definition':
+					result = await this.navigation.goToDefinition(argumentsValue.symbol, argumentsValue.file);
+					break;
+			}
 		}
 
 		this.trace(`tool.result ${JSON.stringify(result)}`);
@@ -294,189 +312,43 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 	}
 }
 
-function isCodeToolName(name: string): name is CodeToolName {
-	return name === 'open_code_target' || name === 'show_code_references';
+function isNavigationToolName(name: string): name is NavigationToolName {
+	return name === 'open_file' || name === 'open_symbol' || name === 'show_references' || name === 'go_to_definition';
 }
 
-function isCodeTargetId(value: string): value is CodeTargetId {
-	return Object.prototype.hasOwnProperty.call(CODE_TARGETS, value);
-}
-
-function parseCodeTargetArguments(serializedArguments: string): CodeTargetId | undefined {
+function parseNavigationToolArguments(toolName: NavigationToolName, serializedArguments: string): NavigationToolArguments | undefined {
 	try {
-		const value = JSON.parse(serializedArguments) as Record<string, string> | null;
-		if (value !== null
-			&& typeof value === 'object'
-			&& !Array.isArray(value)
-			&& Object.keys(value).length === 1
-			&& typeof value.target === 'string'
-			&& isCodeTargetId(value.target)) {
-			return value.target;
-		}
-	} catch {
-		// Invalid JSON is rejected at the host boundary.
-	}
-	return undefined;
-}
-
-async function openCodeTarget(targetId: CodeTargetId, highlight: vscode.TextEditorDecorationType): Promise<ToolResult> {
-	const target = CODE_TARGETS[targetId];
-	try {
-		const resolved = await resolveCodeTarget(target);
-		await revealCodeTarget(resolved, highlight);
-
-		return {
-			ok: true,
-			target: targetId,
-			file: vscode.workspace.asRelativePath(resolved.uri),
-			line: resolved.selectionRange.start.line + 1,
-			spoken_response: `Opened ${target.spokenName}.`,
-		};
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		void vscode.window.showErrorMessage(vscode.l10n.t('CDE could not open {0}: {1}', target.spokenName, message));
-		return {
-			ok: false,
-			target: targetId,
-			spoken_response: `I could not open ${target.spokenName}.`,
-			error: message,
-		};
-	}
-}
-
-async function showCodeReferences(targetId: CodeTargetId, highlight: vscode.TextEditorDecorationType): Promise<ToolResult> {
-	const target = CODE_TARGETS[targetId];
-	try {
-		const resolved = await resolveCodeTarget(target);
-		await revealCodeTarget(resolved, highlight);
-		const references = await vscode.commands.executeCommand<vscode.Location[] | undefined>(
-			'vscode.executeReferenceProvider',
-			resolved.uri,
-			resolved.selectionRange.start,
-		) ?? [];
-
-		if (references.length === 0) {
-			throw new Error(`No references found for ${target.symbol}.`);
+		const value = JSON.parse(serializedArguments) as Record<string, unknown> | null;
+		if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+			return undefined;
 		}
 
-		await vscode.commands.executeCommand(
-			'editor.action.peekLocations',
-			resolved.uri,
-			resolved.selectionRange.start,
-			references,
-			'peek',
-		);
-
-		return {
-			ok: true,
-			target: targetId,
-			file: vscode.workspace.asRelativePath(resolved.uri),
-			line: resolved.selectionRange.start.line + 1,
-			reference_count: references.length,
-			spoken_response: `Showing ${target.spokenName} references.`,
-		};
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		void vscode.window.showErrorMessage(vscode.l10n.t('CDE could not show references for {0}: {1}', target.spokenName, message));
-		return {
-			ok: false,
-			target: targetId,
-			spoken_response: `I could not show ${target.spokenName} references.`,
-			error: message,
-		};
-	}
-}
-
-async function resolveCodeTarget(target: CodeTarget): Promise<ResolvedCodeTarget> {
-	const folder = vscode.workspace.workspaceFolders?.[0];
-	if (!folder) {
-		throw new Error('Open the demo/voice-open-checkout folder first.');
-	}
-
-	const uri = vscode.Uri.joinPath(folder.uri, ...target.file.split('/'));
-	const document = await vscode.workspace.openTextDocument(uri);
-	const providerSymbol = await findSymbolWithRetry(uri, target.symbol);
-	if (providerSymbol) {
-		const range = providerSymbol.range ?? providerSymbol.location?.range;
-		const selectionRange = providerSymbol.selectionRange ?? providerSymbol.location?.range;
-		if (range && selectionRange) {
-			return { uri, document, selectionRange, highlightRange: range };
+		const allowedKeys = toolName === 'open_file'
+			? ['query']
+			: toolName === 'open_symbol'
+				? ['query', 'file']
+				: ['symbol', 'file'];
+		if (Object.keys(value).some(key => !allowedKeys.includes(key))) {
+			return undefined;
 		}
-	}
 
-	return resolveCodeTargetFromText(target, uri, document);
-}
-
-async function findSymbolWithRetry(uri: vscode.Uri, symbolName: string): Promise<SymbolNode | undefined> {
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			const symbols = await vscode.commands.executeCommand<SymbolNode[] | undefined>(
-				'vscode.executeDocumentSymbolProvider',
-				uri,
-			) ?? [];
-			const symbol = findSymbol(symbols, symbolName);
-			if (symbol) {
-				return symbol;
+		for (const candidate of Object.values(value)) {
+			if (typeof candidate !== 'string' || !candidate.trim()) {
+				return undefined;
 			}
-		} catch {
-			// Retry once while the language provider warms up, then use the text anchor.
+		}
+		if ((toolName === 'open_file' || toolName === 'open_symbol') && typeof value.query !== 'string') {
+			return undefined;
 		}
 
-		if (attempt === 0) {
-			await delay(DOCUMENT_SYMBOL_RETRY_DELAY_MS);
-		}
+		return {
+			query: typeof value.query === 'string' ? value.query.trim() : undefined,
+			symbol: typeof value.symbol === 'string' ? value.symbol.trim() : undefined,
+			file: typeof value.file === 'string' ? value.file.trim() : undefined,
+		};
+	} catch {
+		return undefined;
 	}
-	return undefined;
-}
-
-function findSymbol(symbols: readonly SymbolNode[], symbolName: string): SymbolNode | undefined {
-	for (const symbol of symbols) {
-		if (symbol.name === symbolName) {
-			return symbol;
-		}
-		const child = findSymbol(symbol.children ?? [], symbolName);
-		if (child) {
-			return child;
-		}
-	}
-	return undefined;
-}
-
-function resolveCodeTargetFromText(target: CodeTarget, uri: vscode.Uri, document: vscode.TextDocument): ResolvedCodeTarget {
-	const symbolOffsetWithinAnchor = target.fallbackAnchor.indexOf(target.symbol);
-	const anchorOffset = document.getText().indexOf(target.fallbackAnchor);
-	if (anchorOffset < 0 || symbolOffsetWithinAnchor < 0) {
-		throw new Error(`Could not find ${target.symbol} in ${target.file}.`);
-	}
-
-	const symbolOffset = anchorOffset + symbolOffsetWithinAnchor;
-	const start = document.positionAt(symbolOffset);
-	const end = document.positionAt(symbolOffset + target.symbol.length);
-	return {
-		uri,
-		document,
-		selectionRange: new vscode.Range(start, end),
-		highlightRange: document.lineAt(start.line).range,
-	};
-}
-
-async function revealCodeTarget(resolved: ResolvedCodeTarget, highlight: vscode.TextEditorDecorationType): Promise<void> {
-	const editor = await vscode.window.showTextDocument(resolved.document, {
-		preview: false,
-		preserveFocus: false,
-		selection: resolved.selectionRange,
-	});
-	editor.selection = new vscode.Selection(resolved.selectionRange.start, resolved.selectionRange.end);
-	editor.setDecorations(highlight, [resolved.highlightRange]);
-	editor.revealRange(resolved.highlightRange, vscode.TextEditorRevealType.InCenter);
-}
-
-function delay(durationMs: number): Promise<void> {
-	return new Promise(resolve => setTimeout(resolve, durationMs));
-}
-
-function openCheckoutLogic(highlight: vscode.TextEditorDecorationType): Promise<ToolResult> {
-	return openCodeTarget('checkout_final_price', highlight);
 }
 
 function getOpenAiApiKey(): string | undefined {
@@ -492,7 +364,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.wordHighlightStrongForeground'),
 		overviewRulerLane: vscode.OverviewRulerLane.Full,
 	});
-	const provider = new ConversationViewProvider(context.extensionUri, output, highlight);
+	const navigation = new NavigationController(highlight);
+	const provider = new ConversationViewProvider(context.extensionUri, output, navigation);
 	const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	status.name = vscode.l10n.t('CDE Spike');
 	status.text = '$(mic) CDE Spike';
@@ -508,6 +381,6 @@ export function activate(context: vscode.ExtensionContext): void {
 			webviewOptions: { retainContextWhenHidden: true },
 		}),
 		vscode.commands.registerCommand('cde.openConversation', () => vscode.commands.executeCommand('workbench.view.extension.cde')),
-		vscode.commands.registerCommand('cde.openCheckoutDirectly', () => openCheckoutLogic(highlight)),
+		vscode.commands.registerCommand('cde.openCheckoutDirectly', () => navigation.openPreparedCheckout()),
 	);
 }
