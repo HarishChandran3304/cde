@@ -19,6 +19,7 @@ export interface CodeQaToolResult extends CodeQaAnswer {
 interface AgentResultSuccess {
 	readonly type: 'result';
 	readonly subtype: 'success';
+	readonly is_error: boolean;
 	readonly result: string;
 	readonly structured_output?: unknown;
 	readonly num_turns: number;
@@ -28,6 +29,7 @@ interface AgentResultSuccess {
 interface AgentResultError {
 	readonly type: 'result';
 	readonly subtype: 'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd' | 'error_max_structured_output_retries';
+	readonly is_error: boolean;
 	readonly errors: readonly string[];
 }
 
@@ -107,6 +109,9 @@ export class CodeQaController {
 			if (finalResult.subtype !== 'success') {
 				const detail = finalResult.errors.join(' ') || finalResult.subtype;
 				return failure('Claude could not finish that repository question.', detail);
+			}
+			if (finalResult.is_error) {
+				return failure('Claude could not finish that repository question.', finalResult.result);
 			}
 
 			const answer = parseCodeQaAnswer(finalResult.structured_output, finalResult.result);
