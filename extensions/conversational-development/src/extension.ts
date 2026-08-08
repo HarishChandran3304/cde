@@ -45,7 +45,7 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused conversational-development experiment. You have exactly seven useful tools.
+This is a focused conversational-development experiment. You have exactly eight useful tools.
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
 - Use show_references for generic references or usages. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
@@ -53,6 +53,7 @@ This is a focused conversational-development experiment. You have exactly seven 
 - Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
 - Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
 - Use ask_codebase for explanations, "why" questions, behavior, data flow, architecture, risks, debugging questions, and questions about selected code. Pass the user's complete question. It receives live editor context and must inspect the repository before answering. Never answer a repository question from your own knowledge.
+- Use control_walkthrough when the user wants to move through, pause, resume, repeat, stop, or toggle following for an active narrated code walkthrough. "Go back" means previous when the user is clearly discussing the walkthrough; otherwise use editor navigation history.
 - Treat "open the checkout service" as open_file with query "checkout" and "where is the final price calculated" as open_symbol with query "calculateFinalPrice".
 - Never claim an editor action happened before its tool succeeds.
 - Do not speak before calling the tool.
@@ -218,6 +219,23 @@ This is a focused conversational-development experiment. You have exactly seven 
 					},
 				},
 				required: ['question'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'control_walkthrough',
+			description: 'Control the active narrated code walkthrough without changing repository files.',
+			parameters: {
+				type: 'object',
+				properties: {
+					action: {
+						type: 'string',
+						enum: ['next', 'previous', 'repeat', 'pause', 'resume', 'stop', 'follow_on', 'follow_off'],
+						description: 'The walkthrough playback or following action.',
+					},
+				},
+				required: ['action'],
 				additionalProperties: false,
 			},
 		},
@@ -418,6 +436,23 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 			<p id="userText">Say “why can the discount make this negative?”</p>
 			<span class="label">CDE</span>
 			<p id="assistantText">Waiting to connect.</p>
+		</section>
+		<section id="walkthrough" class="walkthrough" hidden>
+			<div class="walkthrough-header">
+				<div>
+					<span class="label">Walkthrough</span>
+					<p id="walkthroughProgress" class="walkthrough-progress"></p>
+				</div>
+				<button id="walkthroughFollow" class="compact" type="button" aria-pressed="true" title="Toggle automatic editor following">Follow On</button>
+			</div>
+			<ol id="walkthroughSteps" class="walkthrough-steps"></ol>
+			<div class="walkthrough-controls">
+				<button id="walkthroughPrevious" class="compact" type="button" title="Previous walkthrough step">Previous</button>
+				<button id="walkthroughPause" class="compact" type="button" title="Pause walkthrough">Pause</button>
+				<button id="walkthroughRepeat" class="compact" type="button" title="Repeat walkthrough step">Repeat</button>
+				<button id="walkthroughNext" class="compact" type="button" title="Next walkthrough step">Next</button>
+				<button id="walkthroughStop" class="compact" type="button" title="Stop walkthrough">Stop</button>
+			</div>
 		</section>
 		<form id="textForm">
 			<input id="textInput" type="text" placeholder="Text fallback" autocomplete="off">

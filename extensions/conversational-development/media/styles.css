@@ -130,6 +130,17 @@ button.secondary {
 	background: var(--vscode-button-secondaryBackground);
 }
 
+button.compact {
+	padding: 5px 7px;
+	color: var(--vscode-button-secondaryForeground);
+	background: var(--vscode-button-secondaryBackground);
+	font-size: 11px;
+}
+
+button.compact:not(:disabled):hover {
+	background: var(--vscode-button-secondaryHoverBackground);
+}
+
 .transcript {
 	display: grid;
 	gap: 5px;
@@ -154,6 +165,133 @@ button.secondary {
 	font-weight: 700;
 	letter-spacing: 0.08em;
 	text-transform: uppercase;
+}
+
+.walkthrough {
+	display: grid;
+	gap: 10px;
+	padding: 11px;
+	border: 1px solid var(--vscode-widget-border);
+	border-radius: 6px;
+	background: var(--vscode-editor-background);
+}
+
+.walkthrough[hidden] {
+	display: none;
+}
+
+.walkthrough-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.walkthrough-progress {
+	margin-top: 2px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+#walkthroughFollow[aria-pressed="true"] {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+}
+
+.walkthrough-steps {
+	display: grid;
+	gap: 3px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.walkthrough-step {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr);
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 7px;
+	color: var(--vscode-foreground);
+	background: transparent;
+	text-align: left;
+}
+
+.walkthrough-step:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
+.walkthrough-steps li.current .walkthrough-step {
+	color: var(--vscode-list-activeSelectionForeground);
+	background: var(--vscode-list-activeSelectionBackground);
+}
+
+.walkthrough-marker {
+	display: grid;
+	place-items: center;
+	width: 20px;
+	height: 20px;
+	border: 1px solid var(--vscode-widget-border);
+	border-radius: 50%;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+}
+
+.walkthrough-steps li.visited .walkthrough-marker {
+	border-color: var(--vscode-testing-iconPassed);
+	color: var(--vscode-testing-iconPassed);
+}
+
+.walkthrough-steps li.current .walkthrough-marker {
+	border-color: currentColor;
+	color: currentColor;
+}
+
+.walkthrough-steps li.failed .walkthrough-marker {
+	border-color: var(--vscode-testing-iconFailed);
+	color: var(--vscode-testing-iconFailed);
+}
+
+.walkthrough-step-copy {
+	display: grid;
+	min-width: 0;
+}
+
+.walkthrough-step-copy strong,
+.walkthrough-step-copy small {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.walkthrough-step-copy strong {
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.walkthrough-step-copy small {
+	margin-top: 1px;
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9px;
+}
+
+.walkthrough-steps li.current .walkthrough-step-copy small {
+	color: currentColor;
+	opacity: 0.75;
+}
+
+.walkthrough-controls {
+	display: grid;
+	grid-template-columns: repeat(5, minmax(0, 1fr));
+	gap: 3px;
+}
+
+.walkthrough-controls button {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 #textForm {
