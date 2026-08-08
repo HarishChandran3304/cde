@@ -68,6 +68,7 @@
 			sendEvent({
 				type: 'session.update',
 				session: {
+					type: 'realtime',
 					audio: {
 						input: {
 							turn_detection: {
