@@ -20,12 +20,29 @@ import {
 	REFERENCE_CONTROL_ACTIONS,
 	ReferenceControlAction,
 } from './navigation';
+import { TerminalOrchestrator, TerminalToolResult } from './terminalOrchestrator';
+import { TERMINAL_CONTROL_ACTIONS, TerminalControlAction } from './terminalProtocol';
 import { WalkthroughController } from './walkthrough';
 
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
-type CdeToolName = 'open_file' | 'focus_open_file' | 'open_symbol' | 'show_references' | 'control_references' | 'show_call_hierarchy' | 'control_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
+type CdeToolName = 'open_file' | 'focus_open_file' | 'open_symbol' | 'show_references' | 'control_references' | 'show_call_hierarchy' | 'control_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase' | 'run_terminal_command' | 'control_terminal';
+
+const CDE_TOOL_ALLOWED_KEYS: Readonly<Record<CdeToolName, readonly string[]>> = {
+	open_file: ['query', 'placement'],
+	focus_open_file: ['query'],
+	open_symbol: ['query', 'file', 'placement'],
+	show_references: ['symbol', 'file'],
+	control_references: ['action', 'file', 'occurrence'],
+	show_call_hierarchy: ['direction', 'symbol', 'file'],
+	control_call_hierarchy: ['action', 'query', 'file'],
+	go_to_definition: ['symbol', 'file', 'placement'],
+	control_editor: ['action'],
+	ask_codebase: ['question'],
+	run_terminal_command: ['command', 'session', 'cwd'],
+	control_terminal: ['action', 'session', 'input', 'submit', 'occurrence'],
+};
 
 interface CdeToolArguments {
 	readonly query?: string;
@@ -36,8 +53,14 @@ interface CdeToolArguments {
 	readonly action?: EditorControlAction;
 	readonly referenceAction?: ReferenceControlAction;
 	readonly callHierarchyAction?: CallHierarchyControlAction;
+	readonly terminalAction?: TerminalControlAction;
 	readonly direction?: CallHierarchyDirection;
 	readonly occurrence?: number;
+	readonly command?: string;
+	readonly session?: string;
+	readonly cwd?: string;
+	readonly input?: string;
+	readonly submit?: boolean;
 }
 
 type WebviewMessage =
@@ -52,7 +75,7 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused conversational-development experiment. You have exactly eleven useful tools.
+This is a focused conversational-development experiment. You have exactly thirteen useful tools.
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
 - Use focus_open_file when the user asks to focus, switch to, or return to an already open file, tab, or pane by name. Use control_editor instead when they specify only a direction such as "focus left".
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
@@ -63,12 +86,14 @@ This is a focused conversational-development experiment. You have exactly eleven
 - Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
 - Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
 - Use ask_codebase for explanations, "why" questions, behavior, data flow, architecture, risks, debugging questions, and questions about selected code. Pass the user's complete question. It receives live editor context and must inspect the repository before answering. Never answer a repository question from your own knowledge.
+- Use run_terminal_command when the user asks to run, start, build, test, lint, serve, migrate, deploy, or execute a shell command. Pass the exact command, give concurrent or long-running work a short semantic session name such as server, tests, or worker, and include cwd only when it differs from the workspace root. The command starts in a visible managed terminal and returns immediately, so do not claim it finished.
+- Use control_terminal for all follow-up terminal operations. Omit session to target the most recently used managed terminal. Use list to enumerate sessions; focus to reveal one; inspect to report status and recent output; interrupt or restart for process control; send_input for interactive input; open_location, next_location, or previous_location for captured file/line output; and close to dispose a session. Terminal completions are silent until the user asks.
 - Use control_walkthrough when the user wants to move through, pause, resume, repeat, stop, or toggle following for an active narrated code walkthrough. "Go back" means previous when the user is clearly discussing the walkthrough; otherwise use editor navigation history.
 - Treat "open the checkout service" as open_file with query "checkout" and "where is the final price calculated" as open_symbol with query "calculateFinalPrice".
 - Never claim an editor action happened before its tool succeeds.
 - Do not speak before calling the tool.
 - When the tool returns, say its spoken_response exactly and add nothing.
-- For unrelated requests, briefly say this experiment currently handles code navigation only.`,
+- For unrelated requests, briefly say this experiment currently handles code navigation, explanation, and terminal orchestration.`,
 	audio: {
 		input: {
 			transcription: { model: 'gpt-4o-mini-transcribe' },
@@ -316,6 +341,64 @@ This is a focused conversational-development experiment. You have exactly eleven
 				additionalProperties: false,
 			},
 		},
+		{
+			type: 'function',
+			name: 'run_terminal_command',
+			description: 'Start a shell command in a visible, named, output-capturing managed terminal session.',
+			parameters: {
+				type: 'object',
+				properties: {
+					command: {
+						type: 'string',
+						description: 'The exact shell command to execute.',
+					},
+					session: {
+						type: 'string',
+						description: 'A short semantic session name, especially for concurrent or long-running work.',
+					},
+					cwd: {
+						type: 'string',
+						description: 'Optional absolute or workspace-relative working directory.',
+					},
+				},
+				required: ['command'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'control_terminal',
+			description: 'Inspect and control managed terminal sessions and navigate file locations captured from their output.',
+			parameters: {
+				type: 'object',
+				properties: {
+					action: {
+						type: 'string',
+						enum: TERMINAL_CONTROL_ACTIONS,
+						description: 'The deterministic terminal session action.',
+					},
+					session: {
+						type: 'string',
+						description: 'Optional session name. Omit for the most recently used session.',
+					},
+					input: {
+						type: 'string',
+						description: 'Text to send for send_input. May be empty to submit a blank line.',
+					},
+					submit: {
+						type: 'boolean',
+						description: 'Whether send_input should press Enter. Defaults to true.',
+					},
+					occurrence: {
+						type: 'integer',
+						minimum: 1,
+						description: 'One-based captured location for open_location.',
+					},
+				},
+				required: ['action'],
+				additionalProperties: false,
+			},
+		},
 	],
 	tool_choice: 'auto',
 	max_output_tokens: 1024,
@@ -329,6 +412,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		private readonly output: vscode.OutputChannel,
 		private readonly navigation: NavigationController,
 		private readonly codeQa: CodeQaController,
+		private readonly terminal: TerminalOrchestrator,
 		private readonly walkthrough: WalkthroughController,
 	) { }
 
@@ -425,7 +509,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 
 	private async executeTool(message: Extract<WebviewMessage, { type: 'executeTool' }>): Promise<void> {
 		this.trace(`tool.call ${message.name} ${message.arguments}`);
-		let result: NavigationToolResult | CodeQaToolResult;
+		let result: NavigationToolResult | CodeQaToolResult | TerminalToolResult;
 		const argumentsValue = isCdeToolName(message.name) ? parseCdeToolArguments(message.name, message.arguments) : undefined;
 		if (!isCdeToolName(message.name)) {
 			result = {
@@ -436,7 +520,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		} else if (!argumentsValue) {
 			result = {
 				ok: false,
-				spoken_response: 'I could not understand that navigation request.',
+				spoken_response: 'I could not understand that tool request.',
 				error: `Invalid arguments for ${message.name}.`,
 			};
 		} else {
@@ -470,6 +554,18 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 					break;
 				case 'ask_codebase':
 					result = await this.codeQa.ask(argumentsValue.question!);
+					break;
+				case 'run_terminal_command':
+					result = await this.terminal.runCommand(argumentsValue.command!, argumentsValue.session, argumentsValue.cwd);
+					break;
+				case 'control_terminal':
+					result = await this.terminal.control(
+						argumentsValue.terminalAction!,
+						argumentsValue.session,
+						argumentsValue.input,
+						argumentsValue.submit,
+						argumentsValue.occurrence,
+					);
 					break;
 			}
 		}
@@ -567,7 +663,9 @@ function isCdeToolName(name: string): name is CdeToolName {
 		|| name === 'control_call_hierarchy'
 		|| name === 'go_to_definition'
 		|| name === 'control_editor'
-		|| name === 'ask_codebase';
+		|| name === 'ask_codebase'
+		|| name === 'run_terminal_command'
+		|| name === 'control_terminal';
 }
 
 function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: string): CdeToolArguments | undefined {
@@ -577,34 +675,16 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			return undefined;
 		}
 
-		const allowedKeys = toolName === 'open_file'
-			? ['query', 'placement']
-			: toolName === 'focus_open_file'
-				? ['query']
-			: toolName === 'open_symbol'
-				? ['query', 'file', 'placement']
-				: toolName === 'show_references'
-					? ['symbol', 'file']
-					: toolName === 'control_references'
-						? ['action', 'file', 'occurrence']
-						: toolName === 'show_call_hierarchy'
-							? ['direction', 'symbol', 'file']
-							: toolName === 'control_call_hierarchy'
-								? ['action', 'query', 'file']
-								: toolName === 'go_to_definition'
-									? ['symbol', 'file', 'placement']
-									: toolName === 'control_editor'
-										? ['action']
-										: ['question'];
+		const allowedKeys = CDE_TOOL_ALLOWED_KEYS[toolName];
 		if (Object.keys(value).some(key => !allowedKeys.includes(key))) {
 			return undefined;
 		}
 
 		for (const [key, candidate] of Object.entries(value)) {
-			if (key === 'occurrence') {
+			if (key === 'occurrence' || key === 'submit') {
 				continue;
 			}
-			if (typeof candidate !== 'string' || !candidate.trim()) {
+			if (typeof candidate !== 'string' || (key !== 'input' && !candidate.trim())) {
 				return undefined;
 			}
 		}
@@ -612,6 +692,9 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			return undefined;
 		}
 		if (toolName === 'ask_codebase' && typeof value.question !== 'string') {
+			return undefined;
+		}
+		if (toolName === 'run_terminal_command' && (typeof value.command !== 'string' || !value.command.trim())) {
 			return undefined;
 		}
 		if (typeof value.placement === 'string' && !EDITOR_PLACEMENTS.includes(value.placement as EditorPlacement)) {
@@ -629,6 +712,13 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			&& (typeof value.action !== 'string' || !CALL_HIERARCHY_CONTROL_ACTIONS.includes(value.action as CallHierarchyControlAction))) {
 			return undefined;
 		}
+		if (toolName === 'control_terminal'
+			&& (typeof value.action !== 'string' || !TERMINAL_CONTROL_ACTIONS.includes(value.action as TerminalControlAction))) {
+			return undefined;
+		}
+		if (value.submit !== undefined && typeof value.submit !== 'boolean') {
+			return undefined;
+		}
 		if (value.occurrence !== undefined
 			&& (!Number.isInteger(value.occurrence) || (value.occurrence as number) < 1)) {
 			return undefined;
@@ -640,6 +730,11 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 		}
 		if (toolName === 'show_call_hierarchy'
 			&& (typeof value.direction !== 'string' || !CALL_HIERARCHY_DIRECTIONS.includes(value.direction as CallHierarchyDirection))) {
+			return undefined;
+		}
+		if (toolName === 'control_terminal'
+			&& value.action === 'send_input'
+			&& typeof value.input !== 'string') {
 			return undefined;
 		}
 
@@ -656,8 +751,16 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 			callHierarchyAction: typeof value.action === 'string' && toolName === 'control_call_hierarchy'
 				? value.action as CallHierarchyControlAction
 				: undefined,
+			terminalAction: typeof value.action === 'string' && toolName === 'control_terminal'
+				? value.action as TerminalControlAction
+				: undefined,
 			direction: typeof value.direction === 'string' ? value.direction as CallHierarchyDirection : undefined,
 			occurrence: typeof value.occurrence === 'number' ? value.occurrence : undefined,
+			command: typeof value.command === 'string' ? value.command.trim() : undefined,
+			session: typeof value.session === 'string' ? value.session.trim() : undefined,
+			cwd: typeof value.cwd === 'string' ? value.cwd.trim() : undefined,
+			input: typeof value.input === 'string' ? value.input : undefined,
+			submit: typeof value.submit === 'boolean' ? value.submit : undefined,
 		};
 	} catch {
 		return undefined;
@@ -679,8 +782,9 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	const navigation = new NavigationController(highlight);
 	const codeQa = new CodeQaController(message => output.appendLine(`${new Date().toISOString()} ${message}`));
+	const terminal = new TerminalOrchestrator(message => output.appendLine(`${new Date().toISOString()} ${message}`));
 	const walkthrough = new WalkthroughController(highlight);
-	const provider = new ConversationViewProvider(context.extensionUri, output, navigation, codeQa, walkthrough);
+	const provider = new ConversationViewProvider(context.extensionUri, output, navigation, codeQa, terminal, walkthrough);
 	const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	status.name = vscode.l10n.t('CDE Spike');
 	status.text = '$(mic) CDE Spike';
@@ -691,6 +795,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		output,
 		highlight,
+		terminal,
 		status,
 		vscode.window.registerWebviewViewProvider(VIEW_ID, provider, {
 			webviewOptions: { retainContextWhenHidden: true },

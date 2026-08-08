@@ -685,8 +685,9 @@
 		pendingTools.set(callId, sessionEpoch);
 		const requestId = nextId('tool');
 		const isCodeQuestion = name === 'ask_codebase';
-		setState('acting', isCodeQuestion ? 'Inspecting the codebase…' : 'Using the IDE…');
-		assistantText.textContent = isCodeQuestion ? 'Reading the relevant code…' : 'Working in the editor…';
+		const isTerminalTool = name === 'run_terminal_command' || name === 'control_terminal';
+		setState('acting', isCodeQuestion ? 'Inspecting the codebase…' : isTerminalTool ? 'Orchestrating terminals…' : 'Using the IDE…');
+		assistantText.textContent = isCodeQuestion ? 'Reading the relevant code…' : isTerminalTool ? 'Working in a managed terminal…' : 'Working in the editor…';
 		log('tool.dispatch', `${name} ${args || '{}'}`);
 		vscode.postMessage({
 			type: 'executeTool',
