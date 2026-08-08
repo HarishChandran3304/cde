@@ -117,6 +117,10 @@ interface WorkspaceSymbolCandidate {
 	readonly symbol: vscode.SymbolInformation;
 }
 
+interface OpenEditorCandidate extends WorkspaceFileCandidate {
+	readonly viewColumn: vscode.ViewColumn;
+}
+
 interface CallHierarchyFrame {
 	readonly root: vscode.CallHierarchyItem;
 	readonly items: readonly vscode.CallHierarchyItem[];
@@ -169,6 +173,45 @@ export class NavigationController {
 			};
 		} catch (error) {
 			return this.failure(`I could not find a file matching ${query}.`, error);
+		}
+	}
+
+	async focusOpenFile(query: string): Promise<NavigationToolResult> {
+		try {
+			const candidates: OpenEditorCandidate[] = [];
+			for (const group of vscode.window.tabGroups.all) {
+				for (const tab of group.tabs) {
+					if (tab.input instanceof vscode.TabInputText) {
+						candidates.push({
+							path: vscode.workspace.asRelativePath(tab.input.uri),
+							uri: tab.input.uri,
+							viewColumn: group.viewColumn,
+						});
+					}
+				}
+			}
+
+			const target = rankFileCandidates(candidates, query);
+			if (!target) {
+				throw new Error(`No open editor matches ${query}.`);
+			}
+
+			const document = await vscode.workspace.openTextDocument(target.uri);
+			await vscode.window.showTextDocument(document, {
+				viewColumn: target.viewColumn,
+				preserveFocus: false,
+				preview: false,
+			});
+			this.clearTransientNavigation();
+			this.lastFile = target.uri;
+			return {
+				ok: true,
+				file: target.path,
+				group_count: vscode.window.tabGroups.all.length,
+				spoken_response: `Focused ${target.path}.`,
+			};
+		} catch (error) {
+			return this.failure(`I could not find an open tab matching ${query}.`, error);
 		}
 	}
 

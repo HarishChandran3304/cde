@@ -25,7 +25,7 @@ import { WalkthroughController } from './walkthrough';
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
-type CdeToolName = 'open_file' | 'open_symbol' | 'show_references' | 'control_references' | 'show_call_hierarchy' | 'control_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
+type CdeToolName = 'open_file' | 'focus_open_file' | 'open_symbol' | 'show_references' | 'control_references' | 'show_call_hierarchy' | 'control_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
 
 interface CdeToolArguments {
 	readonly query?: string;
@@ -52,8 +52,9 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused conversational-development experiment. You have exactly ten useful tools.
+This is a focused conversational-development experiment. You have exactly eleven useful tools.
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
+- Use focus_open_file when the user asks to focus, switch to, or return to an already open file, tab, or pane by name. Use control_editor instead when they specify only a direction such as "focus left".
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
 - Use show_references for generic references or usages. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
 - Use control_references after show_references when the user says next reference, previous reference, open this reference, close references, or asks for a reference in a particular file. For requests like "show me the one in checkout.js", use select_file and pass the user's filename or module phrase as file. When the user specifies an ordinal, such as "the second one in checkout", pass occurrence 2.
@@ -99,6 +100,22 @@ This is a focused conversational-development experiment. You have exactly ten us
 						type: 'string',
 						enum: EDITOR_PLACEMENTS,
 						description: 'Where to open the file. Omit for the current editor.',
+					},
+				},
+				required: ['query'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'focus_open_file',
+			description: 'Fuzzy-find an already open text tab and focus its existing editor group.',
+			parameters: {
+				type: 'object',
+				properties: {
+					query: {
+						type: 'string',
+						description: 'A concise filename, path, or module phrase for an already open tab.',
 					},
 				},
 				required: ['query'],
@@ -427,6 +444,9 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				case 'open_file':
 					result = await this.navigation.openFile(argumentsValue.query!, argumentsValue.placement);
 					break;
+				case 'focus_open_file':
+					result = await this.navigation.focusOpenFile(argumentsValue.query!);
+					break;
 				case 'open_symbol':
 					result = await this.navigation.openSymbol(argumentsValue.query!, argumentsValue.file, argumentsValue.placement);
 					break;
@@ -539,6 +559,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 
 function isCdeToolName(name: string): name is CdeToolName {
 	return name === 'open_file'
+		|| name === 'focus_open_file'
 		|| name === 'open_symbol'
 		|| name === 'show_references'
 		|| name === 'control_references'
@@ -558,6 +579,8 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 
 		const allowedKeys = toolName === 'open_file'
 			? ['query', 'placement']
+			: toolName === 'focus_open_file'
+				? ['query']
 			: toolName === 'open_symbol'
 				? ['query', 'file', 'placement']
 				: toolName === 'show_references'
@@ -585,7 +608,7 @@ function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: strin
 				return undefined;
 			}
 		}
-		if ((toolName === 'open_file' || toolName === 'open_symbol') && typeof value.query !== 'string') {
+		if ((toolName === 'open_file' || toolName === 'focus_open_file' || toolName === 'open_symbol') && typeof value.query !== 'string') {
 			return undefined;
 		}
 		if (toolName === 'ask_codebase' && typeof value.question !== 'string') {
