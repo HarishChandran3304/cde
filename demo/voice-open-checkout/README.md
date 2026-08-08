@@ -1,15 +1,35 @@
-# Voice Checkout Navigation Demo
+# Voice Workspace Navigation Demo
 
 Launch the CDE development build with this folder as its workspace and connect the CDE sidebar.
 
-Check direct navigation:
+Check fuzzy file navigation:
 
-> Open the file with the checkout logic.
+> Open the cart summary.
 
-CDE opens `src/checkout.ts` and selects `calculateFinalPrice`.
+CDE opens `src/cart/cart-summary.ts`.
 
-Then check native code intelligence:
+Check workspace symbol navigation:
 
-> Show me every caller of `calculateFinalPrice`.
+> Where is `calculateFinalPrice` defined?
 
-The references view should include checkout execution, cart summaries, order drafts, and promotion previews.
+CDE opens `src/checkout.ts`, selects `calculateFinalPrice`, and remembers it as the active navigation target.
+
+Check contextual native code intelligence:
+
+> Show me every reference.
+
+The native References peek should include checkout execution, cart summaries, order drafts, and promotion previews. The provider returns all references, including imports and the declaration; it is not filtered to call sites.
+
+Then close the peek or navigate to a usage and say:
+
+> Go back to its definition.
+
+CDE returns to the remembered `calculateFinalPrice` definition.
+
+Other prepared checks:
+
+- “Open checkout.ts.”
+- “Open the order draft.”
+- “Open `createOrderDraft`.”
+- “Show references to `previewDiscount`.”
+- “Open the payments ledger.” should fail without changing the editor.

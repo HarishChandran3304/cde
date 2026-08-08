@@ -291,7 +291,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		<button id="connect" class="primary">Connect</button>
 		<section class="transcript" aria-live="polite">
 			<span class="label">You</span>
-			<p id="userText">Say “open the checkout logic.”</p>
+			<p id="userText">Say “open the cart summary.”</p>
 			<span class="label">CDE</span>
 			<p id="assistantText">Waiting to connect.</p>
 		</section>

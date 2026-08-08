@@ -103,7 +103,7 @@
 				setState('listening', 'Listening');
 				connectButton.disabled = false;
 				connectButton.textContent = 'Disconnect';
-				assistantText.textContent = 'Ask me to navigate the checkout code.';
+				assistantText.textContent = 'Ask me to navigate the workspace.';
 				log('realtime.ready');
 			});
 			channel.addEventListener('message', event => {
