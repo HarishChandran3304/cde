@@ -207,6 +207,53 @@ export class NavigationController {
 		}
 	}
 
+	async showCallHierarchy(direction: CallHierarchyDirection, symbolQuery?: string, fileQuery?: string): Promise<NavigationToolResult> {
+		try {
+			const origin = await this.resolveOrigin(symbolQuery, fileQuery);
+			const roots = await vscode.commands.executeCommand<vscode.CallHierarchyItem[] | undefined>(
+				'vscode.prepareCallHierarchy',
+				origin.uri,
+				origin.selectionRange.start,
+			) ?? [];
+			const root = roots.find(item => item.name === origin.symbolName) ?? roots[0];
+			if (!root) {
+				throw new Error(`No call hierarchy is available for ${origin.symbolName ?? 'the selected symbol'}.`);
+			}
+
+			let callNames: string[];
+			if (direction === 'incoming') {
+				const calls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[] | undefined>('vscode.provideIncomingCalls', root) ?? [];
+				callNames = calls.map(call => call.from.name);
+			} else {
+				const calls = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[] | undefined>('vscode.provideOutgoingCalls', root) ?? [];
+				callNames = calls.map(call => call.to.name);
+			}
+
+			await this.revealTarget(origin);
+			await vscode.commands.executeCommand('editor.showCallHierarchy');
+			await vscode.commands.executeCommand(direction === 'incoming' ? 'editor.showIncomingCalls' : 'editor.showOutgoingCalls');
+			if (origin.symbolName) {
+				this.rememberSymbol(origin);
+			}
+
+			const subject = origin.symbolName ?? 'the selected symbol';
+			const spokenResponse = direction === 'incoming'
+				? callNames.length === 0 ? `No callers found for ${subject}.` : `Showing ${callNames.length} callers of ${subject}.`
+				: callNames.length === 0 ? `${subject} does not call another symbol.` : `Showing ${callNames.length} calls from ${subject}.`;
+			return {
+				ok: true,
+				file: vscode.workspace.asRelativePath(origin.uri),
+				line: origin.selectionRange.start.line + 1,
+				symbol: origin.symbolName,
+				call_count: callNames.length,
+				calls: callNames,
+				spoken_response: spokenResponse,
+			};
+		} catch (error) {
+			return this.failure('I could not show the call hierarchy for that symbol.', error);
+		}
+	}
+
 	async goToDefinition(symbolQuery?: string, fileQuery?: string, placement: EditorPlacement = 'current'): Promise<NavigationToolResult> {
 		try {
 			const origin = await this.resolveOrigin(symbolQuery, fileQuery);

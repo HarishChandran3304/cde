@@ -5,6 +5,8 @@
 
 import * as vscode from 'vscode';
 import {
+	CALL_HIERARCHY_DIRECTIONS,
+	CallHierarchyDirection,
 	EDITOR_CONTROL_ACTIONS,
 	EDITOR_PLACEMENTS,
 	EditorControlAction,
@@ -16,7 +18,7 @@ import {
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
-type NavigationToolName = 'open_file' | 'open_symbol' | 'show_references' | 'go_to_definition' | 'control_editor';
+type NavigationToolName = 'open_file' | 'open_symbol' | 'show_references' | 'show_call_hierarchy' | 'go_to_definition' | 'control_editor';
 
 interface NavigationToolArguments {
 	readonly query?: string;
@@ -24,6 +26,7 @@ interface NavigationToolArguments {
 	readonly file?: string;
 	readonly placement?: EditorPlacement;
 	readonly action?: EditorControlAction;
+	readonly direction?: CallHierarchyDirection;
 }
 
 type WebviewMessage =
@@ -36,10 +39,11 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused code-navigation experiment. You have exactly five useful tools.
+This is a focused code-navigation experiment. You have exactly six useful tools.
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
-- Use show_references for references, usages, or callers. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
+- Use show_references for generic references or usages. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
+- Use show_call_hierarchy with incoming for actual callers and outgoing for functions called by the target. Do not use generic references when the user specifically says callers, callees, incoming calls, or outgoing calls.
 - Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
 - Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
 - Treat "open the checkout service" as open_file with query "checkout" and "where is the final price calculated" as open_symbol with query "calculateFinalPrice".
@@ -142,6 +146,31 @@ This is a focused code-navigation experiment. You have exactly five useful tools
 					},
 				},
 				required: ['action'],
+				additionalProperties: false,
+			},
+		},
+		{
+			type: 'function',
+			name: 'show_call_hierarchy',
+			description: 'Show true incoming callers or outgoing calls for an explicit, selected, or recently opened symbol.',
+			parameters: {
+				type: 'object',
+				properties: {
+					direction: {
+						type: 'string',
+						enum: CALL_HIERARCHY_DIRECTIONS,
+						description: 'Incoming means callers; outgoing means symbols called by the target.',
+					},
+					symbol: {
+						type: 'string',
+						description: 'Optional explicit source symbol name. Omit for contextual follow-ups.',
+					},
+					file: {
+						type: 'string',
+						description: 'Optional filename or path hint for the explicit symbol.',
+					},
+				},
+				required: ['direction'],
 				additionalProperties: false,
 			},
 		},
@@ -285,6 +314,9 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				case 'show_references':
 					result = await this.navigation.showReferences(argumentsValue.symbol, argumentsValue.file);
 					break;
+				case 'show_call_hierarchy':
+					result = await this.navigation.showCallHierarchy(argumentsValue.direction!, argumentsValue.symbol, argumentsValue.file);
+					break;
 				case 'go_to_definition':
 					result = await this.navigation.goToDefinition(argumentsValue.symbol, argumentsValue.file, argumentsValue.placement);
 					break;
@@ -358,7 +390,12 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 }
 
 function isNavigationToolName(name: string): name is NavigationToolName {
-	return name === 'open_file' || name === 'open_symbol' || name === 'show_references' || name === 'go_to_definition' || name === 'control_editor';
+	return name === 'open_file'
+		|| name === 'open_symbol'
+		|| name === 'show_references'
+		|| name === 'show_call_hierarchy'
+		|| name === 'go_to_definition'
+		|| name === 'control_editor';
 }
 
 function parseNavigationToolArguments(toolName: NavigationToolName, serializedArguments: string): NavigationToolArguments | undefined {
@@ -374,9 +411,11 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 				? ['query', 'file', 'placement']
 				: toolName === 'show_references'
 					? ['symbol', 'file']
-					: toolName === 'go_to_definition'
-						? ['symbol', 'file', 'placement']
-						: ['action'];
+					: toolName === 'show_call_hierarchy'
+						? ['direction', 'symbol', 'file']
+						: toolName === 'go_to_definition'
+							? ['symbol', 'file', 'placement']
+							: ['action'];
 		if (Object.keys(value).some(key => !allowedKeys.includes(key))) {
 			return undefined;
 		}
@@ -396,6 +435,10 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 			&& (typeof value.action !== 'string' || !EDITOR_CONTROL_ACTIONS.includes(value.action as EditorControlAction))) {
 			return undefined;
 		}
+		if (toolName === 'show_call_hierarchy'
+			&& (typeof value.direction !== 'string' || !CALL_HIERARCHY_DIRECTIONS.includes(value.direction as CallHierarchyDirection))) {
+			return undefined;
+		}
 
 		return {
 			query: typeof value.query === 'string' ? value.query.trim() : undefined,
@@ -403,6 +446,7 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 			file: typeof value.file === 'string' ? value.file.trim() : undefined,
 			placement: typeof value.placement === 'string' ? value.placement as EditorPlacement : undefined,
 			action: typeof value.action === 'string' ? value.action as EditorControlAction : undefined,
+			direction: typeof value.direction === 'string' ? value.direction as CallHierarchyDirection : undefined,
 		};
 	} catch {
 		return undefined;
