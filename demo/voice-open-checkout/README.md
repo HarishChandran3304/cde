@@ -20,6 +20,17 @@ Check contextual native code intelligence:
 
 The native References peek should include checkout execution, cart summaries, order drafts, and promotion previews. The provider returns all references, including imports and the declaration; it is not filtered to call sites.
 
+Navigate inside the open References peek:
+
+- “Show the next reference.”
+- “Go to the previous reference.”
+- “Show me the one in the order draft.”
+- “Show me the reference in checkout.js.” CDE fuzzily resolves this to `src/checkout.ts`.
+- “Open this reference.”
+- “Close references.”
+
+File-specific requests retain the native References UI and advance it to a result in the requested file.
+
 Then close the peek or navigate to a usage and say:
 
 > Go back to its definition.
