@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { CodeQaController, CodeQaToolResult } from './codeQa';
+import { CodeQaWalkthroughStep } from './codeQaProtocol';
 import {
 	CALL_HIERARCHY_DIRECTIONS,
 	CallHierarchyDirection,
@@ -15,6 +16,7 @@ import {
 	NavigationController,
 	NavigationToolResult,
 } from './navigation';
+import { WalkthroughController } from './walkthrough';
 
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
@@ -34,6 +36,8 @@ interface CdeToolArguments {
 type WebviewMessage =
 	| { readonly type: 'exchangeSdp'; readonly requestId: string; readonly sdp: string }
 	| { readonly type: 'executeTool'; readonly requestId: string; readonly sessionEpoch: number; readonly callId: string; readonly name: string; readonly arguments: string }
+	| { readonly type: 'revealWalkthroughStep'; readonly requestId: string; readonly sessionEpoch: number; readonly walkthroughId: string; readonly stepIndex: number; readonly step: CodeQaWalkthroughStep }
+	| { readonly type: 'resetWalkthrough' }
 	| { readonly type: 'openCheckoutDirectly'; readonly requestId: string };
 
 const realtimeSession = {
@@ -230,6 +234,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		private readonly output: vscode.OutputChannel,
 		private readonly navigation: NavigationController,
 		private readonly codeQa: CodeQaController,
+		private readonly walkthrough: WalkthroughController,
 	) { }
 
 	resolveWebviewView(view: vscode.WebviewView): void {
@@ -250,6 +255,22 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 				return;
 			case 'executeTool':
 				await this.executeTool(message);
+				return;
+			case 'revealWalkthroughStep': {
+				const result = await this.walkthrough.reveal(message.step);
+				this.trace(`walkthrough.reveal index=${message.stepIndex} ${JSON.stringify(result)}`);
+				await this.post({
+					type: 'walkthroughStepReady',
+					requestId: message.requestId,
+					sessionEpoch: message.sessionEpoch,
+					walkthroughId: message.walkthroughId,
+					stepIndex: message.stepIndex,
+					result,
+				});
+				return;
+			}
+			case 'resetWalkthrough':
+				this.walkthrough.reset();
 				return;
 			case 'openCheckoutDirectly': {
 				const result = await this.navigation.openPreparedCheckout();
@@ -501,7 +522,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	const navigation = new NavigationController(highlight);
 	const codeQa = new CodeQaController(message => output.appendLine(`${new Date().toISOString()} ${message}`));
-	const provider = new ConversationViewProvider(context.extensionUri, output, navigation, codeQa);
+	const walkthrough = new WalkthroughController(highlight);
+	const provider = new ConversationViewProvider(context.extensionUri, output, navigation, codeQa, walkthrough);
 	const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	status.name = vscode.l10n.t('CDE Spike');
 	status.text = '$(mic) CDE Spike';
