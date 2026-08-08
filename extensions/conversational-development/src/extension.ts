@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { CodeQaController, CodeQaToolResult } from './codeQa';
 import {
 	CALL_HIERARCHY_DIRECTIONS,
 	CallHierarchyDirection,
@@ -18,10 +19,11 @@ import {
 const VIEW_ID = 'cde.conversation';
 const SDP_EXCHANGE_TIMEOUT_MS = 15_000;
 
-type NavigationToolName = 'open_file' | 'open_symbol' | 'show_references' | 'show_call_hierarchy' | 'go_to_definition' | 'control_editor';
+type CdeToolName = 'open_file' | 'open_symbol' | 'show_references' | 'show_call_hierarchy' | 'go_to_definition' | 'control_editor' | 'ask_codebase';
 
-interface NavigationToolArguments {
+interface CdeToolArguments {
 	readonly query?: string;
+	readonly question?: string;
 	readonly symbol?: string;
 	readonly file?: string;
 	readonly placement?: EditorPlacement;
@@ -39,13 +41,14 @@ const realtimeSession = {
 	model: 'gpt-realtime-2.1',
 	instructions: `You are CDE, a terse voice interface inside a code editor.
 
-This is a focused code-navigation experiment. You have exactly six useful tools.
+This is a focused conversational-development experiment. You have exactly seven useful tools.
 - Use open_file when the user names or describes a file or module they want opened. Pass only the meaningful filename or module phrase as query, such as "checkout", "cart summary", or "src/orders/order-draft.ts". Use placement when the user says beside, left, right, or below.
 - Use open_symbol when the user asks where a function, class, method, or other named symbol is defined. Convert spoken names to their likely source identifier, such as "calculate final price" to "calculateFinalPrice". Include file only when the user supplies a file hint, and placement when they request another pane.
 - Use show_references for generic references or usages. Omit symbol when the user says "it", "that", "this", or otherwise refers to the current or last-opened symbol.
 - Use show_call_hierarchy with incoming for actual callers and outgoing for functions called by the target. Do not use generic references when the user specifically says callers, callees, incoming calls, or outgoing calls.
 - Use go_to_definition when the user asks to go back or jump to a definition. Omit symbol for contextual follow-ups and use placement for requests like "open its definition on the right".
 - Use control_editor for splits, focus changes, moving tabs or groups, closing or pinning tabs, and navigation history. Distinguish moving this tab from moving the whole editor group.
+- Use ask_codebase for explanations, "why" questions, behavior, data flow, architecture, risks, debugging questions, and questions about selected code. Pass the user's complete question. It receives live editor context and must inspect the repository before answering. Never answer a repository question from your own knowledge.
 - Treat "open the checkout service" as open_file with query "checkout" and "where is the final price calculated" as open_symbol with query "calculateFinalPrice".
 - Never claim an editor action happened before its tool succeeds.
 - Do not speak before calling the tool.
@@ -198,6 +201,22 @@ This is a focused code-navigation experiment. You have exactly six useful tools.
 				additionalProperties: false,
 			},
 		},
+		{
+			type: 'function',
+			name: 'ask_codebase',
+			description: 'Inspect the current repository with Claude and answer a grounded code question using live editor context.',
+			parameters: {
+				type: 'object',
+				properties: {
+					question: {
+						type: 'string',
+						description: 'The complete repository question in the user\'s own words.',
+					},
+				},
+				required: ['question'],
+				additionalProperties: false,
+			},
+		},
 	],
 	tool_choice: 'auto',
 	max_output_tokens: 120,
@@ -210,6 +229,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		private readonly extensionUri: vscode.Uri,
 		private readonly output: vscode.OutputChannel,
 		private readonly navigation: NavigationController,
+		private readonly codeQa: CodeQaController,
 	) { }
 
 	resolveWebviewView(view: vscode.WebviewView): void {
@@ -289,9 +309,9 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 
 	private async executeTool(message: Extract<WebviewMessage, { type: 'executeTool' }>): Promise<void> {
 		this.trace(`tool.call ${message.name} ${message.arguments}`);
-		let result: NavigationToolResult;
-		const argumentsValue = isNavigationToolName(message.name) ? parseNavigationToolArguments(message.name, message.arguments) : undefined;
-		if (!isNavigationToolName(message.name)) {
+		let result: NavigationToolResult | CodeQaToolResult;
+		const argumentsValue = isCdeToolName(message.name) ? parseCdeToolArguments(message.name, message.arguments) : undefined;
+		if (!isCdeToolName(message.name)) {
 			result = {
 				ok: false,
 				spoken_response: 'That tool is not available in this experiment.',
@@ -322,6 +342,9 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 					break;
 				case 'control_editor':
 					result = await this.navigation.controlEditor(argumentsValue.action!);
+					break;
+				case 'ask_codebase':
+					result = await this.codeQa.ask(argumentsValue.question!);
 					break;
 			}
 		}
@@ -368,7 +391,7 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 		<button id="connect" class="primary">Connect</button>
 		<section class="transcript" aria-live="polite">
 			<span class="label">You</span>
-			<p id="userText">Say “open the cart summary.”</p>
+			<p id="userText">Say “why can the discount make this negative?”</p>
 			<span class="label">CDE</span>
 			<p id="assistantText">Waiting to connect.</p>
 		</section>
@@ -389,16 +412,17 @@ class ConversationViewProvider implements vscode.WebviewViewProvider {
 	}
 }
 
-function isNavigationToolName(name: string): name is NavigationToolName {
+function isCdeToolName(name: string): name is CdeToolName {
 	return name === 'open_file'
 		|| name === 'open_symbol'
 		|| name === 'show_references'
 		|| name === 'show_call_hierarchy'
 		|| name === 'go_to_definition'
-		|| name === 'control_editor';
+		|| name === 'control_editor'
+		|| name === 'ask_codebase';
 }
 
-function parseNavigationToolArguments(toolName: NavigationToolName, serializedArguments: string): NavigationToolArguments | undefined {
+function parseCdeToolArguments(toolName: CdeToolName, serializedArguments: string): CdeToolArguments | undefined {
 	try {
 		const value = JSON.parse(serializedArguments) as Record<string, unknown> | null;
 		if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -415,7 +439,9 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 						? ['direction', 'symbol', 'file']
 						: toolName === 'go_to_definition'
 							? ['symbol', 'file', 'placement']
-							: ['action'];
+							: toolName === 'control_editor'
+								? ['action']
+								: ['question'];
 		if (Object.keys(value).some(key => !allowedKeys.includes(key))) {
 			return undefined;
 		}
@@ -426,6 +452,9 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 			}
 		}
 		if ((toolName === 'open_file' || toolName === 'open_symbol') && typeof value.query !== 'string') {
+			return undefined;
+		}
+		if (toolName === 'ask_codebase' && typeof value.question !== 'string') {
 			return undefined;
 		}
 		if (typeof value.placement === 'string' && !EDITOR_PLACEMENTS.includes(value.placement as EditorPlacement)) {
@@ -442,6 +471,7 @@ function parseNavigationToolArguments(toolName: NavigationToolName, serializedAr
 
 		return {
 			query: typeof value.query === 'string' ? value.query.trim() : undefined,
+			question: typeof value.question === 'string' ? value.question.trim() : undefined,
 			symbol: typeof value.symbol === 'string' ? value.symbol.trim() : undefined,
 			file: typeof value.file === 'string' ? value.file.trim() : undefined,
 			placement: typeof value.placement === 'string' ? value.placement as EditorPlacement : undefined,
@@ -467,7 +497,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		overviewRulerLane: vscode.OverviewRulerLane.Full,
 	});
 	const navigation = new NavigationController(highlight);
-	const provider = new ConversationViewProvider(context.extensionUri, output, navigation);
+	const codeQa = new CodeQaController(message => output.appendLine(`${new Date().toISOString()} ${message}`));
+	const provider = new ConversationViewProvider(context.extensionUri, output, navigation, codeQa);
 	const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	status.name = vscode.l10n.t('CDE Spike');
 	status.text = '$(mic) CDE Spike';

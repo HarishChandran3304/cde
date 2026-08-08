@@ -103,7 +103,7 @@
 				setState('listening', 'Listening');
 				connectButton.disabled = false;
 				connectButton.textContent = 'Disconnect';
-				assistantText.textContent = 'Ask me to navigate the workspace.';
+				assistantText.textContent = 'Ask me to navigate or explain the workspace.';
 				log('realtime.ready');
 			});
 			channel.addEventListener('message', event => {
@@ -216,8 +216,9 @@
 		handledCalls.add(callId);
 		pendingTools.set(callId, sessionEpoch);
 		const requestId = nextId('tool');
-		setState('acting', 'Using the IDE…');
-		assistantText.textContent = 'Working in the editor…';
+		const isCodeQuestion = name === 'ask_codebase';
+		setState('acting', isCodeQuestion ? 'Inspecting the codebase…' : 'Using the IDE…');
+		assistantText.textContent = isCodeQuestion ? 'Reading the relevant code…' : 'Working in the editor…';
 		log('tool.dispatch', `${name} ${args || '{}'}`);
 		vscode.postMessage({
 			type: 'executeTool',
@@ -237,7 +238,7 @@
 		pendingTools.delete(message.callId);
 		awaitingToolFollowup = true;
 		log('tool.result', JSON.stringify(message.result));
-		assistantText.textContent = message.result.spoken_response;
+		assistantText.textContent = message.result.display_response || message.result.spoken_response;
 		sendEvent({
 			type: 'conversation.item.create',
 			item: {
