@@ -21,7 +21,8 @@
   "main": "./out/extension",
   "scripts": {
     "compile": "gulp compile-extension:conversational-development",
-    "watch": "gulp watch-extension:conversational-development"
+    "watch": "gulp watch-extension:conversational-development",
+    "test:navigation": "node --test ./out/test/navigationRanking.test.js"
   },
   "contributes": {
     "viewsContainers": {
