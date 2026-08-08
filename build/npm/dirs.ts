@@ -15,6 +15,7 @@ export const dirs = [
 	'build/vite',
 	'extensions',
 	'extensions/configuration-editing',
+	'extensions/conversational-development',
 	'extensions/copilot',
 	'extensions/css-language-features',
 	'extensions/css-language-features/server',

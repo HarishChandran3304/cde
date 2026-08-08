@@ -255,6 +255,7 @@ export class CodeApplication extends Disposable {
 			...alwaysAllowedPermissions,
 			'clipboard-read',
 			'clipboard-sanitized-write',
+			'media',
 			// TODO(deepak1556): Should be removed once migration is complete
 			// https://github.com/microsoft/vscode/issues/239228
 			'deprecated-sync-clipboard-read',

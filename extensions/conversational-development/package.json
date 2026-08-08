@@ -1,0 +1,82 @@
+{
+  "name": "conversational-development",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "0.0.1",
+  "publisher": "cde",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.133.0"
+  },
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:cde.conversation"
+  ],
+  "main": "./out/extension",
+  "scripts": {
+    "compile": "gulp compile-extension:conversational-development",
+    "watch": "gulp watch-extension:conversational-development",
+    "test:navigation": "node --test ./out/test/navigationRanking.test.js",
+    "test:code-qa": "node --test ./out/test/codeQaProtocol.test.js"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cde",
+          "icon": "$(mic-filled)",
+          "title": "%container.title%"
+        }
+      ]
+    },
+    "views": {
+      "cde": [
+        {
+          "type": "webview",
+          "id": "cde.conversation",
+          "name": "%view.title%"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cde.openConversation",
+        "title": "%command.open%",
+        "category": "%command.category%",
+        "icon": "$(mic-filled)"
+      },
+      {
+        "command": "cde.openCheckoutDirectly",
+        "title": "%command.openCheckout%",
+        "category": "%command.category%"
+      }
+    ],
+    "configuration": {
+      "title": "CDE",
+      "properties": {
+        "cde.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%configuration.openaiApiKey%",
+          "scope": "machine"
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@types/node": "24.x"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode.git"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.226"
+  }
+}

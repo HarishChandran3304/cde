@@ -1,0 +1,10 @@
+{
+  "displayName": "Conversational Development Environment",
+  "description": "Voice-to-IDE architecture spike.",
+  "container.title": "CDE",
+  "view.title": "Conversation",
+  "command.category": "CDE",
+  "command.open": "Open Conversation",
+  "command.openCheckout": "Open Checkout Logic Directly",
+  "configuration.openaiApiKey": "OpenAI API key used by this local Realtime experiment."
+}
